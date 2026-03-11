@@ -387,7 +387,7 @@ function updateConfirmState() {
 
 function populateSuggestions(text) {
     setSuggestionsLoading(false);
-    $('#chz-suggestions').html(formatBullets(text));
+    $('#chz-suggestions').html('<pre>' + escapeHtml(text) + '</pre>');
 }
 
 function populateSituation(text) {
@@ -403,14 +403,6 @@ function showSuggestionsError(message) {
 function showSituationError(message) {
     setSituationLoading(false);
     $('#chz-error-2').text(message).removeClass('chz-hidden');
-}
-
-function formatBullets(text) {
-    const items = text.split('\n')
-        .map(l => l.replace(/^[\s\-\*•]+/, '').trim())
-        .filter(Boolean);
-    if (!items.length) return `<span>${escapeHtml(text)}</span>`;
-    return '<ul>' + items.map(l => `<li>${escapeHtml(l)}</li>`).join('') + '</ul>';
 }
 
 // ─── Event Handlers ───────────────────────────────────────────────────────────
