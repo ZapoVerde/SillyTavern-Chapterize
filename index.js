@@ -41,14 +41,14 @@ const DEFAULT_DIGEST_PROMPT = `You are summarising a session of collaborative fi
 
 Below is a session transcript. Write a summary of what happened: where the story went, what the key moments were, how things stand at the end.
 
-Write for a human reader who was there but wants a clear digest to review and correct. Be specific — name the moments that mattered, name what shifted. Aim for 150-250 words.
+Write for a human reader who was there but wants a clear digest to review and correct. Be specific — name the moments that mattered, name what shifted. Aim for 300-500 words.
 
 Do not add preamble. Output only the summary.
 
 SESSION TRANSCRIPT:
 {{transcript}}`;
 
-const DEFAULT_DIGEST_PROMPT_AFT = `REMINDER: Your task is to summarise the transcript above, not continue it. Write a 150-250 word summary of what happened. Do not add preamble. Output only the summary.`;
+const DEFAULT_DIGEST_PROMPT_AFT = `REMINDER: Your task is to summarise the transcript above, not continue it. Write a 300-500 word summary of what happened. Do not add preamble. Output only the summary.`;
 
 const DEFAULT_CARD_PROMPT = `You are a precise editor making minimal corrections to a character description.
 
@@ -73,7 +73,7 @@ const DEFAULT_SITUATION_PROMPT = `You are writing the situation summary for the 
 
 Below is a session transcript and a player-reviewed summary. Treat anything in the summary that does not appear in the transcript as a deliberate correction or addition by the player — weight it accordingly.
 
-Write in present tense. Be specific — name the location, who is present, what is unresolved, what the emotional temperature is. Aim for 100-150 words. Do not narrate. Do not editorialize. Do not add preamble. Output only the summary text.
+Write in present tense. Be specific — name the location, who is present, what is unresolved, what the emotional temperature is. Aim for 200-500 words. Do not narrate. Do not editorialize. Do not add preamble. Output only the summary text.
 
 SESSION TRANSCRIPT:
 {{transcript}}
@@ -83,7 +83,7 @@ PLAYER-REVIEWED SUMMARY:
 
 const DEFAULT_CARD_PROMPT_AFT = `REMINDER: Your task is to make the smallest possible edit to the character description above. Do not rewrite. Do not improve. Do not polish. Return the complete description with only what is factually wrong or critically missing corrected, followed by ---CHANGES--- and a line diff. If nothing needed changing, return it unchanged followed by ---CHANGES--- and "No changes."`;
 
-const DEFAULT_SITUATION_PROMPT_AFT = `REMINDER: Your task is to write a 100-150 word situation summary in present tense. Do not narrate. Do not editorialize. Do not add preamble. Output only the summary text.`;
+const DEFAULT_SITUATION_PROMPT_AFT = `REMINDER: Your task is to write a 200-500 word situation summary in present tense. Do not narrate. Do not editorialize. Do not add preamble. Output only the summary text.`;
 
 const SETTINGS_DEFAULTS = Object.freeze({
     turnsN:              DEFAULT_TURNS_N,
