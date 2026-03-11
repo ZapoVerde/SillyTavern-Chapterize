@@ -50,10 +50,12 @@ CONSTRAINTS:
 - People change slowly; keep edits minimal and integrated into the current prose style.
 - If no changes are needed, return the description as-is.
 
-OUTPUT FORMAT:
-[Updated Description]
----CHANGES---
-[A 3 to 5 point list of what you edited and why]
+### OUTPUT FORMAT
+Identify specific sections of the description that need updating or new blocks that should be added. Format your response as a series of snippets:
+
+**### [Section Name/Header]**
+[The revised or new prose intended for the card]
+*Reason: [One sentence explaining the change]*
 
 CHARACTER DESCRIPTION:
 {{original_description}}
@@ -65,9 +67,7 @@ SESSION TRANSCRIPT:
 `;
 
 const DEFAULT_CARD_PROMPT_AFT = `
-Provide a concise bulleted list of suggested edits. 
-Each bullet should follow the format: "Update [Section] to reflect [New Fact]." 
-Do not rewrite the description yourself; only provide the instructions for the user.
+Generate 2–4 specific prose snippets based on the recent events. Each snippet should be written as a "drop-in" replacement or a new addition to the character's description. Maintain the established tone and formatting exactly. Do not provide meta-advice; provide the actual text to be used.
 `;
 
 const DEFAULT_SITUATION_PROMPT = `
@@ -247,7 +247,8 @@ function buildChatHeader(chatMetadata) {
 // ─── Message Slice ────────────────────────────────────────────────────────────
 
 /**
- * Returns the last `turnsToCarry` complete turn pairs from `messages`.
+ * Returns messages starting from the last `turnsToCarry` turn boundary, then
+ * walked back until an AI reply is the first message in the slice.
  * 1 turn = 1 user message + 1 AI response = 2 array elements.
  * If the chat ends on an unanswered user message, it is stripped first so
  * only complete pairs are carried.
@@ -256,7 +257,13 @@ function buildLastN(messages, turnsToCarry) {
     const valid = messages.filter(m => !m.is_system && m.mes !== undefined);
     const isLastUnmatched = valid.length > 0 && valid[valid.length - 1].is_user;
     const base = isLastUnmatched ? valid.slice(0, -1) : valid;
-    return base.slice(-(turnsToCarry * 2));
+    // Step 1: go back to the N-turns boundary
+    let start = Math.max(0, base.length - turnsToCarry * 2);
+    // Step 2: walk back from there until we land on an AI reply
+    while (start > 0 && base[start].is_user) {
+        start--;
+    }
+    return base.slice(start);
 }
 
 // ─── Chat Save ────────────────────────────────────────────────────────────────
