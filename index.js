@@ -33,6 +33,7 @@ import { extension_settings } from '../../../extensions.js';
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const EXT_NAME        = 'chapterize';
+const SITUATION_SEP   = '\n\n***---SITUATION---***\n\n';
 const MIN_TURNS       = 1;
 const MAX_TURNS       = 10;
 const DEFAULT_TURNS_N = 4;
@@ -431,7 +432,7 @@ async function onChapterizeClick() {
 
     // Strip any existing situation block so the card editor shows only the prose.
     const raw    = char.description ?? '';
-    const sepIdx = raw.indexOf('\n\n---\n\n');
+    const sepIdx = raw.indexOf(SITUATION_SEP);
     _originalDescription = sepIdx !== -1 ? raw.slice(0, sepIdx) : raw;
     _transcript          = buildTranscript(messages);
 
@@ -482,7 +483,7 @@ async function onConfirmClick() {
 
     // Last-resort guard: strip any situation block the user may have left in
     // the description textarea (e.g. pasted from outside).
-    const separatorIndex = cardText.indexOf('\n\n---\n\n');
+    const separatorIndex = cardText.indexOf(SITUATION_SEP);
     if (separatorIndex !== -1) {
         cardText = cardText.slice(0, separatorIndex);
     }
@@ -491,7 +492,7 @@ async function onConfirmClick() {
 
     const context        = SillyTavern.getContext();
     const char           = context.characters[context.characterId];
-    const newDescription = `${cardText}\n\n---\n\n${situationText}`;
+    const newDescription = `${cardText}${SITUATION_SEP}${situationText}`;
     const lastN          = buildLastN(context.chat, turnsToCarry);
 
     // Both operations start immediately and run in parallel.
