@@ -146,8 +146,8 @@ async function runStep2Calls(editedDigest) {
     });
 
     const [cardText, situationText] = await Promise.all([
-        generateRaw({ prompt: cardPrompt }),
-        generateRaw({ prompt: situationPrompt }),
+        generateRaw({ prompt: cardPrompt, trimNames: false }),
+        generateRaw({ prompt: situationPrompt, trimNames: false }),
     ]);
 
     return { cardText, situationText };
@@ -435,7 +435,7 @@ async function runDigestCall() {
         const prompt = interpolate(getSettings().digestPrompt, {
             transcript: _transcript,
         });
-        const digest = await generateRaw({ prompt });
+        const digest = await generateRaw({ prompt, trimNames: false });
         _digestContent = digest;
         showStep1(digest);
     } catch (err) {
