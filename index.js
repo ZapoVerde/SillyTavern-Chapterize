@@ -159,10 +159,8 @@ async function runStep2Calls(editedDigest) {
     const situationAft  = getSettings().situationPromptAft?.trim();
     const situationPrompt = situationAft ? `${situationFore}\n\n${situationAft}` : situationFore;
 
-    const [cardText, situationText] = await Promise.all([
-        generateRaw({ prompt: cardPrompt, trimNames: false }),
-        generateRaw({ prompt: situationPrompt, trimNames: false }),
-    ]);
+    const cardText      = await generateRaw({ prompt: cardPrompt,      trimNames: false });
+    const situationText = await generateRaw({ prompt: situationPrompt, trimNames: false });
 
     return { cardText, situationText };
 }
@@ -303,6 +301,7 @@ const MODAL_HTML = `
       <div id="chz-error-1" class="chz-error-banner chz-hidden"></div>
       <div class="chz-buttons">
         <button id="chz-next"     class="chz-btn chz-btn-primary">Next \u2192</button>
+        <button id="chz-regen-1"  class="chz-btn chz-btn-secondary">Regenerate</button>
         <button id="chz-cancel-1" class="chz-btn chz-btn-secondary">Cancel</button>
       </div>
     </div>
@@ -342,6 +341,7 @@ function injectModal() {
     $('body').append(MODAL_HTML);
 
     $('#chz-next').on('click',     onNextClick);
+    $('#chz-regen-1').on('click',  onRegen1Click);
     $('#chz-cancel-1').on('click', closeModal);
     $('#chz-back').on('click',     onBackClick);
     $('#chz-regen').on('click',    onRegenClick);
@@ -370,7 +370,7 @@ function showStep1(digest) {
     $('#chz-loading, #chz-step-2').addClass('chz-hidden');
     $('#chz-error-1').addClass('chz-hidden').text('');
     $('#chz-digest').val(digest);
-    $('#chz-next').prop('disabled', false);
+    setStep1Busy(false);
     $('#chz-step-1').removeClass('chz-hidden');
 }
 
@@ -461,6 +461,16 @@ async function runDigestCall() {
 async function retryDigest() {
     showLoading('Retrying...');
     await runDigestCall();
+}
+
+async function onRegen1Click() {
+    setStep1Busy(true);
+    showLoading('Regenerating digest...');
+    await runDigestCall();
+}
+
+function setStep1Busy(isBusy) {
+    $('#chz-next, #chz-regen-1, #chz-cancel-1').prop('disabled', isBusy);
 }
 
 async function onNextClick() {
