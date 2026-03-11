@@ -341,6 +341,8 @@ function injectModal() {
 }
 
 function showModal() {
+    const sheldWidth = $('#sheld').outerWidth();
+    if (sheldWidth) $('#chz-modal').css('width', sheldWidth + 'px');
     $('#chz-overlay').removeClass('chz-hidden');
 }
 
@@ -503,6 +505,8 @@ async function onConfirmClick() {
     try {
         await charSavePromise;
         isCharacterSaved = true;
+        char.description = newDescription; // sync in-memory state with what was saved
+        if (char.data) char.data.description = newDescription;
         chapterName = await chapterNamePromise;
     } catch (err) {
         const suffix = isCharacterSaved ? ' (Character card was already saved.)' : '';

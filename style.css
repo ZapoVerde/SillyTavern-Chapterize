@@ -135,17 +135,14 @@
     color: var(--chz-text);
 }
 
-.chz-suggestions-box ul {
+.chz-suggestions-box pre {
     margin: 0;
-    padding-left: 1.2em;
-}
-
-.chz-suggestions-box li {
-    margin-bottom: 4px;
-}
-
-.chz-suggestions-box li:last-child {
-    margin-bottom: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+    color: inherit;
 }
 
 /* ─── Textareas ──────────────────────────────────────────────────────────── */
