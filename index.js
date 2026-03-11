@@ -48,6 +48,8 @@ Do not add preamble. Output only the summary.
 SESSION TRANSCRIPT:
 {{transcript}}`;
 
+const DEFAULT_DIGEST_PROMPT_AFT = `REMINDER: Your task is to summarise the transcript above, not continue it. Write a 150-250 word summary of what happened. Do not add preamble. Output only the summary.`;
+
 const DEFAULT_CARD_PROMPT = `You are a precise editor making minimal corrections to a character description.
 
 Below is a character description, a session transcript, and a player-reviewed summary of the session. Treat anything in the summary that does not appear in the transcript as a deliberate correction or addition by the player — weight it accordingly.
@@ -80,12 +82,13 @@ PLAYER-REVIEWED SUMMARY:
 {{edited_digest}}`;
 
 const SETTINGS_DEFAULTS = Object.freeze({
-    turnsN:          DEFAULT_TURNS_N,
-    storeChangelog:  true,
-    digestPrompt:    DEFAULT_DIGEST_PROMPT,
-    cardPrompt:      DEFAULT_CARD_PROMPT,
-    situationPrompt: DEFAULT_SITUATION_PROMPT,
-    changelog:       [],
+    turnsN:           DEFAULT_TURNS_N,
+    storeChangelog:   true,
+    digestPrompt:     DEFAULT_DIGEST_PROMPT,
+    digestPromptAft:  DEFAULT_DIGEST_PROMPT_AFT,
+    cardPrompt:       DEFAULT_CARD_PROMPT,
+    situationPrompt:  DEFAULT_SITUATION_PROMPT,
+    changelog:        [],
 });
 
 // ─── Session State ────────────────────────────────────────────────────────────
@@ -432,9 +435,9 @@ async function onChapterizeClick() {
 
 async function runDigestCall() {
     try {
-        const prompt = interpolate(getSettings().digestPrompt, {
-            transcript: _transcript,
-        });
+        const fore = interpolate(getSettings().digestPrompt, { transcript: _transcript });
+        const aft  = getSettings().digestPromptAft?.trim();
+        const prompt = aft ? `${fore}\n\n${aft}` : fore;
         const digest = await generateRaw({ prompt, trimNames: false });
         _digestContent = digest;
         showStep1(digest);
@@ -576,8 +579,13 @@ function buildSettingsHtml() {
       </div>
 
       <div class="chz-settings-row">
-        <label for="chz-set-prompt-digest">Digest prompt</label>
+        <label for="chz-set-prompt-digest">Digest prompt (before transcript)</label>
         <textarea id="chz-set-prompt-digest" class="chz-settings-textarea">${escapeHtml(s.digestPrompt)}</textarea>
+      </div>
+
+      <div class="chz-settings-row">
+        <label for="chz-set-prompt-digest-aft">Digest prompt (after transcript)</label>
+        <textarea id="chz-set-prompt-digest-aft" class="chz-settings-textarea">${escapeHtml(s.digestPromptAft)}</textarea>
       </div>
 
       <div class="chz-settings-row">
@@ -611,6 +619,11 @@ function bindSettingsHandlers() {
 
     $('#chz-set-prompt-digest').on('input', () => {
         getSettings().digestPrompt = $('#chz-set-prompt-digest').val();
+        saveSettingsDebounced();
+    });
+
+    $('#chz-set-prompt-digest-aft').on('input', () => {
+        getSettings().digestPromptAft = $('#chz-set-prompt-digest-aft').val();
         saveSettingsDebounced();
     });
 
