@@ -4,7 +4,7 @@
  * @architectural-role Feature Entry Point
  * @description
  * SillyTavern extension that closes a roleplay chapter. On user command it:
- * generates an AI change list from the transcript (Call 1, user reviews);
+ * generates an AI digest from the transcript (Call 1, user reviews);
  * then generates an updated character card prose and situation summary in
  * parallel (Calls 2+3, user reviews); then on Confirm writes the new
  * description to the character card and creates a new chapter chat file
@@ -23,7 +23,7 @@
  * @contract
  *   assertions:
  *     purity: mutates
- *     state_ownership: [_transcript, _originalDescription, _changeListContent, extension_settings.chapterize]
+ *     state_ownership: [_transcript, _originalDescription, _digestContent, extension_settings.chapterize]
  *     external_io: https_apis
  */
 
@@ -37,72 +37,55 @@ const MIN_TURNS   = 1;
 const MAX_TURNS   = 10;
 const DEFAULT_TURNS_N = 4;
 
-const DEFAULT_CHANGE_LIST_PROMPT = `You are analysing a collaborative fiction roleplay transcript.
-Below is a character description as it stood at the start of this chapter,
-followed by the full transcript of what happened.
+const DEFAULT_DIGEST_PROMPT = `You are summarising a session of collaborative fiction for the player to review.
 
-List the narratively significant changes to this character.
-Consider: emotional shifts, relationship developments, secrets revealed,
-knowledge gained, goals changed, trust earned or lost, physical changes if any.
+Below is a session transcript. Write a summary of what happened: where the story went, what the key moments were, how things stand at the end.
 
-Write as a simple bullet list. Be specific — reference actual events.
-Do not write prose. Do not add preamble or explanation.
-Output only the bullet list.
+Write for a human reader who was there but wants a clear digest to review and correct. Be specific — name the moments that mattered, name what shifted. Aim for 150-250 words.
 
-ORIGINAL DESCRIPTION:
-{{original_description}}
+Do not add preamble. Output only the summary.
 
-TRANSCRIPT:
+SESSION TRANSCRIPT:
 {{transcript}}`;
 
-const DEFAULT_CARD_PROMPT = `You are updating a character description for a collaborative fiction character.
-Below is the original character description and a list of changes that occurred
-during the most recent chapter.
+const DEFAULT_CARD_PROMPT = `You are a precise editor making minimal corrections to a character description.
 
-Write an updated character description that reflects who this character is RIGHT NOW.
-Write in the same style and format as the original description.
-Do not summarise events. Write the character, not the story.
-Do not add preamble or explanation. Output only the updated description text.
+Below is a character description, a session transcript, and a player-reviewed summary of the session. Treat anything in the summary that does not appear in the transcript as a deliberate correction or addition by the player — weight it accordingly.
 
-ORIGINAL DESCRIPTION:
+The description may contain a situation summary separated by ---. If so, ignore everything after --- — that will be handled separately.
+
+Find the smallest possible edit that makes the character description accurate. Do not rewrite. Do not improve. Do not polish. Change only what is now factually wrong or critically missing.
+
+Return the complete character description with the minimal edit applied, followed by a blank line, then ---CHANGES--- then a line diff showing only what changed. If nothing needed changing, return the description unchanged followed by ---CHANGES--- and "No changes."
+
+CHARACTER DESCRIPTION:
 {{original_description}}
 
-CHANGES THIS CHAPTER:
-{{edited_change_list}}`;
+SESSION TRANSCRIPT:
+{{transcript}}
 
-const DEFAULT_SITUATION_PROMPT = `You are writing a scene-setting summary for the opening of a new chapter
-in a collaborative fiction story.
-Below is a transcript of the chapter so far.
+PLAYER-REVIEWED SUMMARY:
+{{edited_digest}}`;
 
-Write a concise situation summary: where we are, what has just happened,
-what is unresolved or hanging in the air.
-Tone should match the story. This will be read by the AI at the start of
-the next session as grounding context, not as narrative prose for the player.
-Write in present tense. Be specific. Aim for 150-250 words.
-Do not add preamble or explanation. Output only the summary text.
+const DEFAULT_SITUATION_PROMPT = `You are writing the situation summary for the opening of the next session of a collaborative fiction story. This will be inserted into the character card and read by the AI at the start of the next session as a replacement for the full session — grounding it in where the story stands without replaying what happened.
 
-TRANSCRIPT:
-{{transcript}}`;
+Below is a session transcript and a player-reviewed summary. Treat anything in the summary that does not appear in the transcript as a deliberate correction or addition by the player — weight it accordingly.
 
-const DEFAULT_SELFCHECK_PROMPT = `Review the following output for a collaborative fiction character/situation description.
-Flag any hallucinations, contradictions with the source material, or missing critical information.
-If the output is acceptable, reply only with: OK
-If not, reply with a brief note of what needs fixing.
+Write in present tense. Be specific — name the location, who is present, what is unresolved, what the emotional temperature is. Aim for 100-150 words. Do not narrate. Do not editorialize. Do not add preamble. Output only the summary text.
 
-OUTPUT:
-{{generated_text}}
+SESSION TRANSCRIPT:
+{{transcript}}
 
-SOURCE:
-{{transcript_or_change_list}}`;
+PLAYER-REVIEWED SUMMARY:
+{{edited_digest}}`;
 
 const SETTINGS_DEFAULTS = Object.freeze({
-    turnsN:           DEFAULT_TURNS_N,
-    selfcheck:        true,
-    storeChangelog:   true,
-    changeListPrompt: DEFAULT_CHANGE_LIST_PROMPT,
-    cardPrompt:       DEFAULT_CARD_PROMPT,
-    situationPrompt:  DEFAULT_SITUATION_PROMPT,
-    changelog:        [],
+    turnsN:          DEFAULT_TURNS_N,
+    storeChangelog:  true,
+    digestPrompt:    DEFAULT_DIGEST_PROMPT,
+    cardPrompt:      DEFAULT_CARD_PROMPT,
+    situationPrompt: DEFAULT_SITUATION_PROMPT,
+    changelog:       [],
 });
 
 // ─── Session State ────────────────────────────────────────────────────────────
@@ -110,7 +93,7 @@ const SETTINGS_DEFAULTS = Object.freeze({
 
 let _transcript          = '';
 let _originalDescription = '';
-let _changeListContent   = '';
+let _digestContent       = '';
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
@@ -145,37 +128,21 @@ function interpolate(template, vars) {
     return template.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
 }
 
-// ─── Selfcheck ────────────────────────────────────────────────────────────────
-
-/** Returns { ok, feedback } — ok is false if AI flagged issues; feedback is the AI's note. */
-async function runSelfcheck(generatedText, source) {
-    const prompt = interpolate(DEFAULT_SELFCHECK_PROMPT, {
-        generated_text:            generatedText,
-        transcript_or_change_list: source,
-    });
-    try {
-        const result = await generateRaw({ prompt });
-        const trimmed = result.trim();
-        return { ok: trimmed === 'OK', feedback: trimmed === 'OK' ? '' : trimmed };
-    } catch (err) {
-        console.warn('[Chapterize] Selfcheck call failed, treating as OK:', err);
-        return { ok: true, feedback: '' };
-    }
-}
-
 // ─── Step 2 LLM Calls ────────────────────────────────────────────────────────
 
 /**
- * Runs card prose and situation summary calls in parallel (Calls 2 + 3),
- * then selfchecks in parallel if enabled. Returns generated texts, ok flags, and feedback strings.
+ * Runs card prose and situation summary calls in parallel (Calls 2 + 3).
+ * Returns { cardText, situationText }.
  */
-async function runStep2Calls(editedChangeList) {
+async function runStep2Calls(editedDigest) {
     const cardPrompt = interpolate(getSettings().cardPrompt, {
         original_description: _originalDescription,
-        edited_change_list:   editedChangeList,
+        transcript:           _transcript,
+        edited_digest:        editedDigest,
     });
     const situationPrompt = interpolate(getSettings().situationPrompt, {
-        transcript: _transcript,
+        transcript:    _transcript,
+        edited_digest: editedDigest,
     });
 
     const [cardText, situationText] = await Promise.all([
@@ -183,23 +150,7 @@ async function runStep2Calls(editedChangeList) {
         generateRaw({ prompt: situationPrompt }),
     ]);
 
-    let isCardOk      = true;
-    let isSituationOk = true;
-    let cardFeedback  = '';
-    let sitFeedback   = '';
-
-    if (getSettings().selfcheck) {
-        const [cardCheck, situationCheck] = await Promise.all([
-            runSelfcheck(cardText, editedChangeList),
-            runSelfcheck(situationText, _transcript),
-        ]);
-        isCardOk      = cardCheck.ok;
-        isSituationOk = situationCheck.ok;
-        cardFeedback  = cardCheck.feedback;
-        sitFeedback   = situationCheck.feedback;
-    }
-
-    return { cardText, situationText, isCardOk, isSituationOk, cardFeedback, sitFeedback };
+    return { cardText, situationText };
 }
 
 // ─── Character Save ───────────────────────────────────────────────────────────
@@ -262,12 +213,12 @@ async function deriveChapterName(avatarUrl) {
 
 // ─── Changelog ────────────────────────────────────────────────────────────────
 
-function persistChangelog(chapterName, changeList) {
+function persistChangelog(chapterName, digest) {
     if (!getSettings().storeChangelog) return;
     getSettings().changelog.push({
         date: new Date().toISOString(),
         chapterName,
-        changeList,
+        digest,
     });
     saveSettingsDebounced();
 }
@@ -333,8 +284,8 @@ const MODAL_HTML = `
     </div>
 
     <div id="chz-step-1" class="chz-step chz-hidden">
-      <h3 class="chz-title">Review narrative changes</h3>
-      <textarea id="chz-change-list" class="chz-textarea chz-textarea-tall" spellcheck="false"></textarea>
+      <h3 class="chz-title">Review session digest</h3>
+      <textarea id="chz-digest" class="chz-textarea chz-textarea-tall" spellcheck="false"></textarea>
       <div id="chz-error-1" class="chz-error-banner chz-hidden"></div>
       <div class="chz-buttons">
         <button id="chz-next"     class="chz-btn chz-btn-primary">Next \u2192</button>
@@ -346,11 +297,10 @@ const MODAL_HTML = `
       <h3 class="chz-title">Review updated character and situation</h3>
 
       <span class="chz-label">Updated Character Description</span>
-      <div id="chz-card-warn" class="chz-warn chz-hidden">\u26a0 AI flagged possible issues</div>
       <textarea id="chz-card-text" class="chz-textarea chz-textarea-tall" spellcheck="false"></textarea>
+      <div id="chz-card-diff" class="chz-diff"></div>
 
       <span class="chz-label">Situation Summary</span>
-      <div id="chz-sit-warn" class="chz-warn chz-hidden">\u26a0 AI flagged possible issues</div>
       <textarea id="chz-situation-text" class="chz-textarea" spellcheck="false"></textarea>
 
       <div class="chz-turns-row">
@@ -393,7 +343,7 @@ function closeModal() {
     $('#chz-overlay').addClass('chz-hidden');
     _transcript          = '';
     _originalDescription = '';
-    _changeListContent   = '';
+    _digestContent       = '';
 }
 
 function showLoading(msg) {
@@ -402,31 +352,38 @@ function showLoading(msg) {
     $('#chz-loading').removeClass('chz-hidden');
 }
 
-function showStep1(changeList) {
+function showStep1(digest) {
     $('#chz-loading, #chz-step-2').addClass('chz-hidden');
     $('#chz-error-1').addClass('chz-hidden').text('');
-    $('#chz-change-list').val(changeList);
+    $('#chz-digest').val(digest);
     $('#chz-next').prop('disabled', false);
     $('#chz-step-1').removeClass('chz-hidden');
 }
 
 function showStep1WithError(message) {
     $('#chz-loading, #chz-step-2').addClass('chz-hidden');
-    $('#chz-change-list').val('');
+    $('#chz-digest').val('');
     $('#chz-error-1')
         .html(`${escapeHtml(message)} <button id="chz-retry" class="chz-btn chz-btn-secondary chz-btn-inline">Retry</button>`)
         .removeClass('chz-hidden');
-    $('#chz-retry').on('click', retryChangeList);
+    $('#chz-retry').on('click', retryDigest);
     $('#chz-step-1').removeClass('chz-hidden');
 }
 
-function showStep2(cardText, situationText, isCardOk, isSituationOk, cardFeedback = '', sitFeedback = '') {
+function showStep2(cardText, situationText) {
     $('#chz-loading, #chz-step-1').addClass('chz-hidden');
-    $('#chz-card-text').val(cardText);
+
+    // Parse ---CHANGES--- out of the card response.
+    // The card prompt instructs the model to append ---CHANGES--- followed by a line diff.
+    // Split here so the textarea shows only the clean description and the diff is display-only.
+    const parts     = cardText.split('\n\n---CHANGES---');
+    const cleanCard = parts[0].trim();
+    const diffText  = parts.length > 1 ? parts[1].trim() : '(no diff returned)';
+
+    $('#chz-card-text').val(cleanCard);
+    $('#chz-card-diff').text(diffText);
     $('#chz-situation-text').val(situationText);
     $('#chz-turns').val(getSettings().turnsN);
-    $('#chz-card-warn').toggleClass('chz-hidden', isCardOk).attr('title', cardFeedback);
-    $('#chz-sit-warn').toggleClass('chz-hidden', isSituationOk).attr('title', sitFeedback);
     $('#chz-error-2').addClass('chz-hidden').text('');
     setStep2Busy(false);
     $('#chz-step-2').removeClass('chz-hidden');
@@ -436,6 +393,7 @@ function showStep2WithError(message) {
     $('#chz-loading').addClass('chz-hidden');
     $('#chz-step-2').removeClass('chz-hidden');
     setStep2Busy(false);
+    $('#chz-card-diff').text('');
     $('#chz-error-2').text(message).removeClass('chz-hidden');
 }
 
@@ -468,53 +426,51 @@ async function onChapterizeClick() {
     _transcript          = buildTranscript(messages);
 
     showModal();
-    showLoading('Generating change list...');
-    await runChangeListCall();
+    showLoading('Generating digest...');
+    await runDigestCall();
 }
 
-async function runChangeListCall() {
+async function runDigestCall() {
     try {
-        const prompt = interpolate(getSettings().changeListPrompt, {
-            original_description: _originalDescription,
-            transcript:           _transcript,
+        const prompt = interpolate(getSettings().digestPrompt, {
+            transcript: _transcript,
         });
-        const changeList = await generateRaw({ prompt });
-        _changeListContent = changeList;
-        showStep1(changeList);
+        const digest = await generateRaw({ prompt });
+        _digestContent = digest;
+        showStep1(digest);
     } catch (err) {
-        console.error('[Chapterize] Change list generation failed:', err);
+        console.error('[Chapterize] Digest generation failed:', err);
         showStep1WithError(`Generation failed: ${err.message}`);
     }
 }
 
-async function retryChangeList() {
+async function retryDigest() {
     showLoading('Retrying...');
-    await runChangeListCall();
+    await runDigestCall();
 }
 
 async function onNextClick() {
-    const editedChangeList = $('#chz-change-list').val();
-    _changeListContent     = editedChangeList;
+    const editedDigest = $('#chz-digest').val();
+    _digestContent     = editedDigest;
     $('#chz-next').prop('disabled', true);
     showLoading('Generating character card and situation...');
-    await runAndShowStep2(editedChangeList);
+    await runAndShowStep2(editedDigest);
 }
 
 function onBackClick() {
-    showStep1(_changeListContent);
+    showStep1(_digestContent);
 }
 
 async function onRegenClick() {
     setStep2Busy(true);
     showLoading('Regenerating...');
-    await runAndShowStep2(_changeListContent);
+    await runAndShowStep2(_digestContent);
 }
 
-async function runAndShowStep2(editedChangeList) {
+async function runAndShowStep2(editedDigest) {
     try {
-        const { cardText, situationText, isCardOk, isSituationOk, cardFeedback, sitFeedback } =
-            await runStep2Calls(editedChangeList);
-        showStep2(cardText, situationText, isCardOk, isSituationOk, cardFeedback, sitFeedback);
+        const { cardText, situationText } = await runStep2Calls(editedDigest);
+        showStep2(cardText, situationText);
     } catch (err) {
         console.error('[Chapterize] Step 2 generation failed:', err);
         showStep2WithError(`Generation failed: ${err.message}. Edit the fields manually or use Regenerate.`);
@@ -522,10 +478,19 @@ async function runAndShowStep2(editedChangeList) {
 }
 
 async function onConfirmClick() {
-    const cardText      = $('#chz-card-text').val().trim();
+    let cardText        = $('#chz-card-text').val().trim();
     const situationText = $('#chz-situation-text').val().trim();
     const rawTurns      = parseInt($('#chz-turns').val(), 10);
     const turnsToCarry  = Math.max(MIN_TURNS, Math.min(MAX_TURNS, isNaN(rawTurns) ? DEFAULT_TURNS_N : rawTurns));
+
+    // Last-resort guard: the card prompt instructs the model to exclude the old situation
+    // block (separated by \n\n---\n\n), but strip it here in case of partial compliance.
+    // Using \n\n---\n\n as the target to reduce the chance of clipping a legitimate markdown
+    // thematic break that lacks a trailing blank line, though this is not a full guarantee.
+    const separatorIndex = cardText.indexOf('\n\n---\n\n');
+    if (separatorIndex !== -1) {
+        cardText = cardText.slice(0, separatorIndex);
+    }
 
     setStep2Busy(true);
     showLoading('Saving...');
@@ -555,7 +520,7 @@ async function onConfirmClick() {
     }
 
     // Persist changelog after chapterName is known, before remaining writes
-    persistChangelog(chapterName, _changeListContent);
+    persistChangelog(chapterName, _digestContent);
 
     try {
         await saveNewChat(char, chapterName, context.chatMetadata, lastN);
@@ -605,21 +570,14 @@ function buildSettingsHtml() {
 
       <div class="chz-settings-row">
         <label>
-          <input id="chz-set-selfcheck" type="checkbox" ${s.selfcheck ? 'checked' : ''}>
-          Self-check enabled
-        </label>
-      </div>
-
-      <div class="chz-settings-row">
-        <label>
           <input id="chz-set-changelog" type="checkbox" ${s.storeChangelog ? 'checked' : ''}>
           Store changelog
         </label>
       </div>
 
       <div class="chz-settings-row">
-        <label for="chz-set-prompt-change">Change List prompt</label>
-        <textarea id="chz-set-prompt-change" class="chz-settings-textarea">${escapeHtml(s.changeListPrompt)}</textarea>
+        <label for="chz-set-prompt-digest">Digest prompt</label>
+        <textarea id="chz-set-prompt-digest" class="chz-settings-textarea">${escapeHtml(s.digestPrompt)}</textarea>
       </div>
 
       <div class="chz-settings-row">
@@ -646,18 +604,13 @@ function bindSettingsHandlers() {
         }
     });
 
-    $('#chz-set-selfcheck').on('change', () => {
-        getSettings().selfcheck = $('#chz-set-selfcheck').is(':checked');
-        saveSettingsDebounced();
-    });
-
     $('#chz-set-changelog').on('change', () => {
         getSettings().storeChangelog = $('#chz-set-changelog').is(':checked');
         saveSettingsDebounced();
     });
 
-    $('#chz-set-prompt-change').on('input', () => {
-        getSettings().changeListPrompt = $('#chz-set-prompt-change').val();
+    $('#chz-set-prompt-digest').on('input', () => {
+        getSettings().digestPrompt = $('#chz-set-prompt-digest').val();
         saveSettingsDebounced();
     });
 
@@ -684,6 +637,7 @@ function injectButton() {
     if ($('#chz-btn').length) return;
     const btn = $(
         '<div id="chz-btn" class="list-group-item flex-container flexGap5" title="Chapterize">' +
+        '<i class="fa-solid fa-forward-step"></i>' +
         '<span>Chapterize</span>' +
         '</div>'
     );
