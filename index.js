@@ -81,14 +81,20 @@ SESSION TRANSCRIPT:
 PLAYER-REVIEWED SUMMARY:
 {{edited_digest}}`;
 
+const DEFAULT_CARD_PROMPT_AFT = `REMINDER: Your task is to make the smallest possible edit to the character description above. Do not rewrite. Do not improve. Do not polish. Return the complete description with only what is factually wrong or critically missing corrected, followed by ---CHANGES--- and a line diff. If nothing needed changing, return it unchanged followed by ---CHANGES--- and "No changes."`;
+
+const DEFAULT_SITUATION_PROMPT_AFT = `REMINDER: Your task is to write a 100-150 word situation summary in present tense. Do not narrate. Do not editorialize. Do not add preamble. Output only the summary text.`;
+
 const SETTINGS_DEFAULTS = Object.freeze({
-    turnsN:           DEFAULT_TURNS_N,
-    storeChangelog:   true,
-    digestPrompt:     DEFAULT_DIGEST_PROMPT,
-    digestPromptAft:  DEFAULT_DIGEST_PROMPT_AFT,
-    cardPrompt:       DEFAULT_CARD_PROMPT,
-    situationPrompt:  DEFAULT_SITUATION_PROMPT,
-    changelog:        [],
+    turnsN:              DEFAULT_TURNS_N,
+    storeChangelog:      true,
+    digestPrompt:        DEFAULT_DIGEST_PROMPT,
+    digestPromptAft:     DEFAULT_DIGEST_PROMPT_AFT,
+    cardPrompt:          DEFAULT_CARD_PROMPT,
+    cardPromptAft:       DEFAULT_CARD_PROMPT_AFT,
+    situationPrompt:     DEFAULT_SITUATION_PROMPT,
+    situationPromptAft:  DEFAULT_SITUATION_PROMPT_AFT,
+    changelog:           [],
 });
 
 // ─── Session State ────────────────────────────────────────────────────────────
@@ -138,15 +144,20 @@ function interpolate(template, vars) {
  * Returns { cardText, situationText }.
  */
 async function runStep2Calls(editedDigest) {
-    const cardPrompt = interpolate(getSettings().cardPrompt, {
+    const cardFore = interpolate(getSettings().cardPrompt, {
         original_description: _originalDescription,
         transcript:           _transcript,
         edited_digest:        editedDigest,
     });
-    const situationPrompt = interpolate(getSettings().situationPrompt, {
+    const cardAft  = getSettings().cardPromptAft?.trim();
+    const cardPrompt = cardAft ? `${cardFore}\n\n${cardAft}` : cardFore;
+
+    const situationFore = interpolate(getSettings().situationPrompt, {
         transcript:    _transcript,
         edited_digest: editedDigest,
     });
+    const situationAft  = getSettings().situationPromptAft?.trim();
+    const situationPrompt = situationAft ? `${situationFore}\n\n${situationAft}` : situationFore;
 
     const [cardText, situationText] = await Promise.all([
         generateRaw({ prompt: cardPrompt, trimNames: false }),
@@ -589,13 +600,23 @@ function buildSettingsHtml() {
       </div>
 
       <div class="chz-settings-row">
-        <label for="chz-set-prompt-card">Character Card prompt</label>
+        <label for="chz-set-prompt-card">Character Card prompt (before content)</label>
         <textarea id="chz-set-prompt-card" class="chz-settings-textarea">${escapeHtml(s.cardPrompt)}</textarea>
       </div>
 
       <div class="chz-settings-row">
-        <label for="chz-set-prompt-situation">Situation Summary prompt</label>
+        <label for="chz-set-prompt-card-aft">Character Card prompt (after content)</label>
+        <textarea id="chz-set-prompt-card-aft" class="chz-settings-textarea">${escapeHtml(s.cardPromptAft)}</textarea>
+      </div>
+
+      <div class="chz-settings-row">
+        <label for="chz-set-prompt-situation">Situation Summary prompt (before content)</label>
         <textarea id="chz-set-prompt-situation" class="chz-settings-textarea">${escapeHtml(s.situationPrompt)}</textarea>
+      </div>
+
+      <div class="chz-settings-row">
+        <label for="chz-set-prompt-situation-aft">Situation Summary prompt (after content)</label>
+        <textarea id="chz-set-prompt-situation-aft" class="chz-settings-textarea">${escapeHtml(s.situationPromptAft)}</textarea>
       </div>
 
     </div>
@@ -632,8 +653,18 @@ function bindSettingsHandlers() {
         saveSettingsDebounced();
     });
 
+    $('#chz-set-prompt-card-aft').on('input', () => {
+        getSettings().cardPromptAft = $('#chz-set-prompt-card-aft').val();
+        saveSettingsDebounced();
+    });
+
     $('#chz-set-prompt-situation').on('input', () => {
         getSettings().situationPrompt = $('#chz-set-prompt-situation').val();
+        saveSettingsDebounced();
+    });
+
+    $('#chz-set-prompt-situation-aft').on('input', () => {
+        getSettings().situationPromptAft = $('#chz-set-prompt-situation-aft').val();
         saveSettingsDebounced();
     });
 }
