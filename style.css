@@ -1,1 +1,294 @@
-/* Chapterize extension styles */
+/**
+ * @file extensions/chapterize/style.css
+ * Chapterize extension — modal and settings panel styles.
+ * All magic values (colours, dimensions, spacing) are declared as custom
+ * properties in :root so they can be overridden by ST themes.
+ */
+
+/* ─── Design Tokens ──────────────────────────────────────────────────────── */
+
+:root {
+    --chz-overlay-bg:         rgba(0, 0, 0, 0.65);
+    --chz-modal-bg:           var(--black-tinted, #1a1a2e);
+    --chz-modal-border:       var(--border-color-light, #444);
+    --chz-modal-radius:       8px;
+    --chz-modal-width:        580px;
+    --chz-modal-max-h:        90vh;
+    --chz-modal-pad:          20px;
+    --chz-gap:                12px;
+    --chz-gap-sm:             6px;
+
+    --chz-text:               var(--SmartThemeBodyColorText, #e0e0e0);
+    --chz-text-muted:         var(--SmartThemeBodyColorSecondary, #999);
+
+    --chz-input-bg:           var(--black-tinted-extra, #111);
+    --chz-input-border:       var(--border-color-light, #444);
+    --chz-input-radius:       4px;
+    --chz-input-pad:          6px 8px;
+    --chz-textarea-h:         130px;
+    --chz-textarea-h-tall:    210px;
+    --chz-settings-textarea-h: 80px;
+
+    --chz-warn-fg:            #f0c040;
+    --chz-warn-bg:            rgba(240, 192, 64, 0.12);
+
+    --chz-error-fg:           #e05555;
+    --chz-error-bg:           rgba(224, 85, 85, 0.12);
+
+    --chz-btn-radius:         4px;
+    --chz-btn-pad:            6px 14px;
+    --chz-btn-font:           0.85rem;
+    --chz-btn-primary-bg:     var(--SmartThemeBlurTintColor, #5c85d6);
+    --chz-btn-primary-fg:     #ffffff;
+
+    --chz-spinner-size:       1.5rem;
+    --chz-z-modal:            9999;
+}
+
+/* ─── Utility ────────────────────────────────────────────────────────────── */
+
+.chz-hidden {
+    display: none !important;
+}
+
+/* ─── Overlay & Modal Shell ──────────────────────────────────────────────── */
+
+.chz-overlay {
+    position: fixed;
+    inset: 0;
+    background: var(--chz-overlay-bg);
+    z-index: var(--chz-z-modal);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.chz-modal {
+    background: var(--chz-modal-bg);
+    border: 1px solid var(--chz-modal-border);
+    border-radius: var(--chz-modal-radius);
+    width: var(--chz-modal-width);
+    max-width: 95vw;
+    max-height: var(--chz-modal-max-h);
+    overflow-y: auto;
+    padding: var(--chz-modal-pad);
+    display: flex;
+    flex-direction: column;
+    gap: var(--chz-gap);
+    color: var(--chz-text);
+}
+
+/* ─── Loading State ──────────────────────────────────────────────────────── */
+
+.chz-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--chz-gap);
+    padding: 28px 0;
+    color: var(--chz-text-muted);
+}
+
+.chz-spinner {
+    font-size: var(--chz-spinner-size);
+}
+
+/* ─── Step Panels ────────────────────────────────────────────────────────── */
+
+.chz-step {
+    display: flex;
+    flex-direction: column;
+    gap: var(--chz-gap);
+}
+
+.chz-title {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--chz-text);
+}
+
+/* ─── Labels ─────────────────────────────────────────────────────────────── */
+
+.chz-label {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--chz-text-muted);
+    margin-bottom: 2px;
+}
+
+/* ─── Textareas ──────────────────────────────────────────────────────────── */
+
+.chz-textarea {
+    width: 100%;
+    height: var(--chz-textarea-h);
+    resize: vertical;
+    box-sizing: border-box;
+    background: var(--chz-input-bg);
+    color: var(--chz-text);
+    border: 1px solid var(--chz-input-border);
+    border-radius: var(--chz-input-radius);
+    padding: var(--chz-input-pad);
+    font-size: 0.85rem;
+    font-family: inherit;
+    line-height: 1.45;
+}
+
+.chz-textarea-tall {
+    height: var(--chz-textarea-h-tall);
+}
+
+.chz-textarea:focus {
+    outline: none;
+    border-color: var(--chz-btn-primary-bg);
+}
+
+/* ─── Turns Row ──────────────────────────────────────────────────────────── */
+
+.chz-turns-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.chz-turns-row .chz-label {
+    margin: 0;
+    flex-shrink: 0;
+}
+
+.chz-turns-input {
+    width: 68px;
+    background: var(--chz-input-bg);
+    color: var(--chz-text);
+    border: 1px solid var(--chz-input-border);
+    border-radius: var(--chz-input-radius);
+    padding: var(--chz-input-pad);
+    font-size: 0.85rem;
+    text-align: center;
+}
+
+.chz-turns-input:focus {
+    outline: none;
+    border-color: var(--chz-btn-primary-bg);
+}
+
+/* ─── Warnings & Errors ──────────────────────────────────────────────────── */
+
+.chz-warn {
+    font-size: 0.8rem;
+    color: var(--chz-warn-fg);
+    background: var(--chz-warn-bg);
+    border-radius: var(--chz-input-radius);
+    padding: 4px 10px;
+}
+
+.chz-error-banner {
+    font-size: 0.82rem;
+    color: var(--chz-error-fg);
+    background: var(--chz-error-bg);
+    border-radius: var(--chz-input-radius);
+    padding: 8px 10px;
+    line-height: 1.4;
+}
+
+/* ─── Buttons ────────────────────────────────────────────────────────────── */
+
+.chz-buttons {
+    display: flex;
+    gap: var(--chz-gap-sm);
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.chz-btn {
+    padding: var(--chz-btn-pad);
+    border-radius: var(--chz-btn-radius);
+    cursor: pointer;
+    font-size: var(--chz-btn-font);
+    border: 1px solid transparent;
+    transition: opacity 0.15s ease;
+    white-space: nowrap;
+}
+
+.chz-btn:disabled {
+    opacity: 0.38;
+    cursor: not-allowed;
+}
+
+.chz-btn-primary {
+    background: var(--chz-btn-primary-bg);
+    color: var(--chz-btn-primary-fg);
+    border-color: var(--chz-btn-primary-bg);
+}
+
+.chz-btn-primary:not(:disabled):hover {
+    opacity: 0.85;
+}
+
+.chz-btn-secondary {
+    background: transparent;
+    color: var(--chz-text);
+    border-color: var(--chz-modal-border);
+}
+
+.chz-btn-secondary:not(:disabled):hover {
+    border-color: var(--chz-text-muted);
+}
+
+.chz-btn-inline {
+    padding: 2px 8px;
+    font-size: 0.78rem;
+    margin-left: 8px;
+    vertical-align: middle;
+}
+
+/* ─── Settings Panel ─────────────────────────────────────────────────────── */
+
+.chz-settings-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--chz-gap);
+    padding: 4px 0 8px;
+}
+
+.chz-settings-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.chz-settings-row label {
+    font-size: 0.8rem;
+    color: var(--chz-text-muted);
+}
+
+.chz-settings-row input[type="number"] {
+    width: 68px;
+    background: var(--chz-input-bg);
+    color: var(--chz-text);
+    border: 1px solid var(--chz-input-border);
+    border-radius: var(--chz-input-radius);
+    padding: var(--chz-input-pad);
+    font-size: 0.85rem;
+}
+
+.chz-settings-textarea {
+    width: 100%;
+    height: var(--chz-settings-textarea-h);
+    resize: vertical;
+    box-sizing: border-box;
+    background: var(--chz-input-bg);
+    color: var(--chz-text);
+    border: 1px solid var(--chz-input-border);
+    border-radius: var(--chz-input-radius);
+    padding: var(--chz-input-pad);
+    font-size: 0.75rem;
+    font-family: monospace;
+    line-height: 1.4;
+}
+
+.chz-settings-textarea:focus,
+.chz-settings-row input[type="number"]:focus {
+    outline: none;
+    border-color: var(--chz-btn-primary-bg);
+}
