@@ -54,8 +54,8 @@ CONSTRAINTS:
 Identify specific sections of the description that need updating or new blocks that should be added. Format your response as a series of snippets:
 
 **### [Section Name/Header]**
-[The revised or new prose intended for the card]
-*Reason: [One sentence explaining the change]*
+[The replacement text or new text section]
+*Reason: [One sentence explaining the change and where it goes]*
 
 CHARACTER DESCRIPTION:
 {{original_description}}
