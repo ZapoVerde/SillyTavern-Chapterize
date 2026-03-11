@@ -27,7 +27,7 @@
  *     external_io: https_apis
  */
 
-import { generateRaw, saveSettingsDebounced, getRequestHeaders, openCharacterChat, getContext } from '../../../../script.js';
+import { generateRaw, saveSettingsDebounced, getRequestHeaders, openCharacterChat } from '../../../../script.js';
 import { extension_settings } from '../../../extensions.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -446,7 +446,7 @@ function setStep2Busy(isBusy) {
 // ─── Event Handlers ───────────────────────────────────────────────────────────
 
 async function onChapterizeClick() {
-    const context = getContext();
+    const context = SillyTavern.getContext();
 
     if (context.groupId) {
         toastr.warning('Chapterize does not support group chats.');
@@ -530,7 +530,7 @@ async function onConfirmClick() {
     setStep2Busy(true);
     showLoading('Saving...');
 
-    const context        = getContext();
+    const context        = SillyTavern.getContext();
     const char           = context.characters[context.characterId];
     const newDescription = `${cardText}\n\n---\n\n${situationText}`;
     const lastN          = buildLastN(context.chat, turnsToCarry);
