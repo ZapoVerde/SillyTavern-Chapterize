@@ -1,5 +1,5 @@
 /**
- * @file extensions/chapterize/style.css
+ * @file data/default-user/extensions/chapterize/style.css
  * Chapterize extension — modal and settings panel styles.
  * All magic values (colours, dimensions, spacing) are declared as custom
  * properties in :root so they can be overridden by ST themes.
@@ -29,6 +29,9 @@
     --chz-textarea-h-tall:    210px;
     --chz-settings-textarea-h: 80px;
 
+    --chz-suggestions-bg:     rgba(255, 255, 255, 0.03);
+    --chz-suggestions-border: var(--border-color-light, #444);
+
     --chz-warn-fg:            #f0c040;
     --chz-warn-bg:            rgba(240, 192, 64, 0.12);
 
@@ -41,7 +44,6 @@
     --chz-btn-primary-bg:     var(--SmartThemeBlurTintColor, #5c85d6);
     --chz-btn-primary-fg:     #ffffff;
 
-    --chz-spinner-size:       1.5rem;
     --chz-z-modal:            9999;
 }
 
@@ -78,21 +80,6 @@
     color: var(--chz-text);
 }
 
-/* ─── Loading State ──────────────────────────────────────────────────────── */
-
-.chz-loading {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--chz-gap);
-    padding: 28px 0;
-    color: var(--chz-text-muted);
-}
-
-.chz-spinner {
-    font-size: var(--chz-spinner-size);
-}
-
 /* ─── Step Panels ────────────────────────────────────────────────────────── */
 
 .chz-step {
@@ -108,6 +95,24 @@
     color: var(--chz-text);
 }
 
+/* ─── Section Headers (label + spinner + regen button) ───────────────────── */
+
+.chz-section-header {
+    display: flex;
+    align-items: center;
+    gap: var(--chz-gap-sm);
+}
+
+.chz-section-header .chz-label {
+    flex: 1;
+    margin-bottom: 0;
+}
+
+.chz-section-spin {
+    font-size: 0.75rem;
+    color: var(--chz-text-muted);
+}
+
 /* ─── Labels ─────────────────────────────────────────────────────────────── */
 
 .chz-label {
@@ -115,6 +120,32 @@
     font-size: 0.8rem;
     color: var(--chz-text-muted);
     margin-bottom: 2px;
+}
+
+/* ─── Suggestions Box ────────────────────────────────────────────────────── */
+
+.chz-suggestions-box {
+    min-height: 52px;
+    background: var(--chz-suggestions-bg);
+    border: 1px solid var(--chz-suggestions-border);
+    border-radius: var(--chz-input-radius);
+    padding: var(--chz-input-pad);
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--chz-text);
+}
+
+.chz-suggestions-box ul {
+    margin: 0;
+    padding-left: 1.2em;
+}
+
+.chz-suggestions-box li {
+    margin-bottom: 4px;
+}
+
+.chz-suggestions-box li:last-child {
+    margin-bottom: 0;
 }
 
 /* ─── Textareas ──────────────────────────────────────────────────────────── */
@@ -141,6 +172,11 @@
 .chz-textarea:focus {
     outline: none;
     border-color: var(--chz-btn-primary-bg);
+}
+
+.chz-textarea:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
 }
 
 /* ─── Turns Row ──────────────────────────────────────────────────────────── */
@@ -189,6 +225,11 @@
     border-radius: var(--chz-input-radius);
     padding: 8px 10px;
     line-height: 1.4;
+}
+
+.chz-error-inline {
+    font-size: 0.82rem;
+    color: var(--chz-error-fg);
 }
 
 /* ─── Buttons ────────────────────────────────────────────────────────────── */
@@ -242,6 +283,11 @@
     vertical-align: middle;
 }
 
+.chz-btn-sm {
+    padding: 2px 8px;
+    font-size: 0.78rem;
+}
+
 /* ─── Settings Panel ─────────────────────────────────────────────────────── */
 
 .chz-settings-group {
@@ -270,6 +316,12 @@
     border-radius: var(--chz-input-radius);
     padding: var(--chz-input-pad);
     font-size: 0.85rem;
+}
+
+.chz-settings-label-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
 }
 
 .chz-settings-textarea {

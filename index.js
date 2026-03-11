@@ -1,15 +1,15 @@
 /**
- * @file extensions/chapterize/index.js
+ * @file data/default-user/extensions/chapterize/index.js
  * @stamp {"utc":"2026-03-11T00:00:00.000Z"}
  * @architectural-role Feature Entry Point
  * @description
- * SillyTavern extension that closes a roleplay chapter. On user command it:
- * generates an AI digest from the transcript (Call 1, user reviews);
- * then generates an updated character card prose and situation summary in
- * parallel (Calls 2+3, user reviews); then on Confirm writes the new
- * description to the character card and creates a new chapter chat file
- * seeded with the last N turns. Original chat file is never modified (a new
- * one is created), but the Character Card is updated.
+ * SillyTavern extension that closes a roleplay chapter. On button click, fires
+ * two parallel AI calls — a card audit (bullet-point suggestions) and a
+ * situation summary — both rendered inline with independent spinners in a single
+ * review step. The user edits the character description prose directly, guided
+ * by the suggestions. On Confirm, writes the combined description + situation
+ * block to the character card and creates a new chapter chat seeded with the
+ * last N turns. The original chat file is never modified.
  * @core-principles
  * 1. OWNS the full chapterize workflow from button click through new chat open.
  * 2. MUST NOT commit any server write until the user clicks Confirm.
@@ -22,9 +22,9 @@
  * Entry point: onChapterizeClick() (bound to button).
  * @contract
  *   assertions:
- *     purity: mutates
- *     state_ownership: [_transcript, _originalDescription, _digestContent, extension_settings.chapterize]
- *     external_io: https_apis
+ *     purity: mutates # Modifies module-level session state on each invocation.
+ *     state_ownership: [_transcript, _originalDescription, _suggestionsLoading, _situationLoading, extension_settings.chapterize] # Owns all session and settings state.
+ *     external_io: https_apis # generateRaw (LLM) and ST /api/* endpoints.
  */
 
 import { generateRaw, saveSettingsDebounced, getRequestHeaders, openCharacterChat } from '../../../../script.js';
@@ -32,69 +32,45 @@ import { extension_settings } from '../../../extensions.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const EXT_NAME    = 'chapterize';
-const MIN_TURNS   = 1;
-const MAX_TURNS   = 10;
+const EXT_NAME        = 'chapterize';
+const MIN_TURNS       = 1;
+const MAX_TURNS       = 10;
 const DEFAULT_TURNS_N = 4;
 
-const DEFAULT_DIGEST_PROMPT = `You are summarising a session of collaborative fiction for the player to review.
+const DEFAULT_CARD_PROMPT = `You are a narrative consultant.
 
-Below is a session transcript. Write a summary of what happened: where the story went, what the key moments were, how things stand at the end.
+Review the CHARACTER DESCRIPTION and the SESSION TRANSCRIPT.
+Identify 3-5 specific factual updates that should be made to the character card to reflect the new state of the world (e.g., injuries, changed relationships, deaths, new titles, location changes).
 
-Write for a human reader who was there but wants a clear digest to review and correct. Be specific — name the moments that mattered, name what shifted. Aim for 300-500 words.
-
-Do not add preamble. Output only the summary.
-
-SESSION TRANSCRIPT:
-{{transcript}}`;
-
-const DEFAULT_DIGEST_PROMPT_AFT = `REMINDER: Your task is to summarise the transcript above, not continue it. Write a 300-500 word summary of what happened. Do not add preamble. Output only the summary.`;
-
-const DEFAULT_CARD_PROMPT = `You are a precise editor making minimal corrections to a character description.
-
-Below is a character description, a session transcript, and a player-reviewed summary of the session. Treat anything in the summary that does not appear in the transcript as a deliberate correction or addition by the player — weight it accordingly.
-
-The description may contain a situation summary separated by ---. If so, ignore everything after --- — that will be handled separately.
-
-Find the smallest possible edit that makes the character description accurate. Do not rewrite. Do not improve. Do not polish. Change only what is now factually wrong or critically missing.
-
-Return the complete character description with the minimal edit applied, followed by a blank line, then ---CHANGES--- then a line diff showing only what changed. If nothing needed changing, return the description unchanged followed by ---CHANGES--- and "No changes."
+Format as a simple bulleted list. Be specific and concise.
 
 CHARACTER DESCRIPTION:
 {{original_description}}
 
 SESSION TRANSCRIPT:
-{{transcript}}
+{{transcript}}`;
 
-PLAYER-REVIEWED SUMMARY:
-{{edited_digest}}`;
+const DEFAULT_CARD_PROMPT_AFT = `REMINDER: Your task is to make the smallest possible edit to the character description above. Do not rewrite. Do not improve. Do not polish. Return the complete description with only what is factually wrong or critically missing corrected, followed by ---CHANGES--- and a line diff. If nothing needed changing, return it unchanged followed by ---CHANGES--- and "No changes."`;
 
 const DEFAULT_SITUATION_PROMPT = `You are writing the situation summary for the opening of the next session of a collaborative fiction story. This will be inserted into the character card and read by the AI at the start of the next session as a replacement for the full session — grounding it in where the story stands without replaying what happened.
 
-Below is a session transcript and a player-reviewed summary. Treat anything in the summary that does not appear in the transcript as a deliberate correction or addition by the player — weight it accordingly.
+Below is a session transcript.
 
 Write in present tense. Be specific — name the location, who is present, what is unresolved, what the emotional temperature is. Aim for 200-500 words. Do not narrate. Do not editorialize. Do not add preamble. Output only the summary text.
 
 SESSION TRANSCRIPT:
-{{transcript}}
-
-PLAYER-REVIEWED SUMMARY:
-{{edited_digest}}`;
-
-const DEFAULT_CARD_PROMPT_AFT = `REMINDER: Your task is to make the smallest possible edit to the character description above. Do not rewrite. Do not improve. Do not polish. Return the complete description with only what is factually wrong or critically missing corrected, followed by ---CHANGES--- and a line diff. If nothing needed changing, return it unchanged followed by ---CHANGES--- and "No changes."`;
+{{transcript}}`;
 
 const DEFAULT_SITUATION_PROMPT_AFT = `REMINDER: Your task is to write a 200-500 word situation summary in present tense. Do not narrate. Do not editorialize. Do not add preamble. Output only the summary text.`;
 
 const SETTINGS_DEFAULTS = Object.freeze({
-    turnsN:              DEFAULT_TURNS_N,
-    storeChangelog:      true,
-    digestPrompt:        DEFAULT_DIGEST_PROMPT,
-    digestPromptAft:     DEFAULT_DIGEST_PROMPT_AFT,
-    cardPrompt:          DEFAULT_CARD_PROMPT,
-    cardPromptAft:       DEFAULT_CARD_PROMPT_AFT,
-    situationPrompt:     DEFAULT_SITUATION_PROMPT,
-    situationPromptAft:  DEFAULT_SITUATION_PROMPT_AFT,
-    changelog:           [],
+    turnsN:             DEFAULT_TURNS_N,
+    storeChangelog:     true,
+    cardPrompt:         DEFAULT_CARD_PROMPT,
+    cardPromptAft:      DEFAULT_CARD_PROMPT_AFT,
+    situationPrompt:    DEFAULT_SITUATION_PROMPT,
+    situationPromptAft: DEFAULT_SITUATION_PROMPT_AFT,
+    changelog:          [],
 });
 
 // ─── Session State ────────────────────────────────────────────────────────────
@@ -102,7 +78,8 @@ const SETTINGS_DEFAULTS = Object.freeze({
 
 let _transcript          = '';
 let _originalDescription = '';
-let _digestContent       = '';
+let _suggestionsLoading  = false;
+let _situationLoading    = false;
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
@@ -137,32 +114,26 @@ function interpolate(template, vars) {
     return template.replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] ?? '');
 }
 
-// ─── Step 2 LLM Calls ────────────────────────────────────────────────────────
+// ─── LLM Calls ───────────────────────────────────────────────────────────────
 
-/**
- * Runs card prose and situation summary calls in parallel (Calls 2 + 3).
- * Returns { cardText, situationText }.
- */
-async function runStep2Calls(editedDigest) {
-    const cardFore = interpolate(getSettings().cardPrompt, {
+async function runSuggestionsCall() {
+    const fore = interpolate(getSettings().cardPrompt, {
         original_description: _originalDescription,
         transcript:           _transcript,
-        edited_digest:        editedDigest,
     });
-    const cardAft  = getSettings().cardPromptAft?.trim();
-    const cardPrompt = cardAft ? `${cardFore}\n\n${cardAft}` : cardFore;
+    const aft    = getSettings().cardPromptAft?.trim();
+    const prompt = aft ? `${fore}\n\n${aft}` : fore;
+    return generateRaw({ prompt, trimNames: false });
+}
 
-    const situationFore = interpolate(getSettings().situationPrompt, {
-        transcript:    _transcript,
-        edited_digest: editedDigest,
+async function runSituationCall() {
+    const fore = interpolate(getSettings().situationPrompt, {
+        transcript:           _transcript,
+        original_description: _originalDescription,
     });
-    const situationAft  = getSettings().situationPromptAft?.trim();
-    const situationPrompt = situationAft ? `${situationFore}\n\n${situationAft}` : situationFore;
-
-    const cardText      = await generateRaw({ prompt: cardPrompt,      trimNames: false });
-    const situationText = await generateRaw({ prompt: situationPrompt, trimNames: false });
-
-    return { cardText, situationText };
+    const aft    = getSettings().situationPromptAft?.trim();
+    const prompt = aft ? `${fore}\n\n${aft}` : fore;
+    return generateRaw({ prompt, trimNames: false });
 }
 
 // ─── Character Save ───────────────────────────────────────────────────────────
@@ -225,12 +196,11 @@ async function deriveChapterName(avatarUrl) {
 
 // ─── Changelog ────────────────────────────────────────────────────────────────
 
-function persistChangelog(chapterName, digest) {
+function persistChangelog(chapterName) {
     if (!getSettings().storeChangelog) return;
     getSettings().changelog.push({
         date: new Date().toISOString(),
         chapterName,
-        digest,
     });
     saveSettingsDebounced();
 }
@@ -290,30 +260,24 @@ const MODAL_HTML = `
 <div id="chz-overlay" class="chz-overlay chz-hidden">
   <div id="chz-modal" class="chz-modal" role="dialog" aria-modal="true">
 
-    <div id="chz-loading" class="chz-loading chz-hidden">
-      <span class="chz-spinner fa-solid fa-spinner fa-spin"></span>
-      <span id="chz-loading-msg">Generating...</span>
-    </div>
-
-    <div id="chz-step-1" class="chz-step chz-hidden">
-      <h3 class="chz-title">Review session digest</h3>
-      <textarea id="chz-digest" class="chz-textarea chz-textarea-tall" spellcheck="false"></textarea>
-      <div id="chz-error-1" class="chz-error-banner chz-hidden"></div>
-      <div class="chz-buttons">
-        <button id="chz-next"     class="chz-btn chz-btn-primary">Next \u2192</button>
-        <button id="chz-regen-1"  class="chz-btn chz-btn-secondary">Regenerate</button>
-        <button id="chz-cancel-1" class="chz-btn chz-btn-secondary">Cancel</button>
-      </div>
-    </div>
-
     <div id="chz-step-2" class="chz-step chz-hidden">
-      <h3 class="chz-title">Review updated character and situation</h3>
+      <h3 class="chz-title">Finalize Character &amp; Situation</h3>
 
-      <span class="chz-label">Updated Character Description</span>
+      <div class="chz-section-header">
+        <span class="chz-label">AI Suggested Tweaks</span>
+        <span id="chz-spin-suggestions" class="chz-section-spin fa-solid fa-spinner fa-spin chz-hidden"></span>
+        <button id="chz-regen-suggestions" class="chz-btn chz-btn-secondary chz-btn-sm">&#x21bb;</button>
+      </div>
+      <div id="chz-suggestions" class="chz-suggestions-box"></div>
+
+      <span class="chz-label">Edit Character Description</span>
       <textarea id="chz-card-text" class="chz-textarea chz-textarea-tall" spellcheck="false"></textarea>
-      <div id="chz-card-diff" class="chz-diff"></div>
 
-      <span class="chz-label">Situation Summary</span>
+      <div class="chz-section-header">
+        <span class="chz-label">Situation Summary</span>
+        <span id="chz-spin-situation" class="chz-section-spin fa-solid fa-spinner fa-spin chz-hidden"></span>
+        <button id="chz-regen-situation" class="chz-btn chz-btn-secondary chz-btn-sm">&#x21bb;</button>
+      </div>
       <textarea id="chz-situation-text" class="chz-textarea" spellcheck="false"></textarea>
 
       <div class="chz-turns-row">
@@ -324,8 +288,6 @@ const MODAL_HTML = `
 
       <div id="chz-error-2" class="chz-error-banner chz-hidden"></div>
       <div class="chz-buttons">
-        <button id="chz-back"     class="chz-btn chz-btn-secondary">\u2190 Back</button>
-        <button id="chz-regen"    class="chz-btn chz-btn-secondary">Regenerate</button>
         <button id="chz-confirm"  class="chz-btn chz-btn-primary">Confirm</button>
         <button id="chz-cancel-2" class="chz-btn chz-btn-secondary">Cancel</button>
       </div>
@@ -340,13 +302,10 @@ function injectModal() {
     if ($('#chz-overlay').length) return;
     $('body').append(MODAL_HTML);
 
-    $('#chz-next').on('click',     onNextClick);
-    $('#chz-regen-1').on('click',  onRegen1Click);
-    $('#chz-cancel-1').on('click', closeModal);
-    $('#chz-back').on('click',     onBackClick);
-    $('#chz-regen').on('click',    onRegenClick);
-    $('#chz-confirm').on('click',  onConfirmClick);
-    $('#chz-cancel-2').on('click', closeModal);
+    $('#chz-regen-suggestions').on('click', onRegenSuggestionsClick);
+    $('#chz-regen-situation').on('click',   onRegenSituationClick);
+    $('#chz-confirm').on('click',           onConfirmClick);
+    $('#chz-cancel-2').on('click',          closeModal);
 }
 
 function showModal() {
@@ -357,62 +316,69 @@ function closeModal() {
     $('#chz-overlay').addClass('chz-hidden');
     _transcript          = '';
     _originalDescription = '';
-    _digestContent       = '';
+    _suggestionsLoading  = false;
+    _situationLoading    = false;
 }
 
-function showLoading(msg) {
-    $('#chz-step-1, #chz-step-2').addClass('chz-hidden');
-    $('#chz-loading-msg').text(msg ?? 'Generating...');
-    $('#chz-loading').removeClass('chz-hidden');
-}
-
-function showStep1(digest) {
-    $('#chz-loading, #chz-step-2').addClass('chz-hidden');
-    $('#chz-error-1').addClass('chz-hidden').text('');
-    $('#chz-digest').val(digest);
-    setStep1Busy(false);
-    $('#chz-step-1').removeClass('chz-hidden');
-}
-
-function showStep1WithError(message) {
-    $('#chz-loading, #chz-step-2').addClass('chz-hidden');
-    $('#chz-digest').val('');
-    $('#chz-error-1')
-        .html(`${escapeHtml(message)} <button id="chz-retry" class="chz-btn chz-btn-secondary chz-btn-inline">Retry</button>`)
-        .removeClass('chz-hidden');
-    $('#chz-retry').on('click', retryDigest);
-    $('#chz-step-1').removeClass('chz-hidden');
-}
-
-function showStep2(cardText, situationText) {
-    $('#chz-loading, #chz-step-1').addClass('chz-hidden');
-
-    // Parse ---CHANGES--- out of the card response.
-    // The card prompt instructs the model to append ---CHANGES--- followed by a line diff.
-    // Split here so the textarea shows only the clean description and the diff is display-only.
-    const parts     = cardText.split('\n\n---CHANGES---');
-    const cleanCard = parts[0].trim();
-    const diffText  = parts.length > 1 ? parts[1].trim() : '(no diff returned)';
-
-    $('#chz-card-text').val(cleanCard);
-    $('#chz-card-diff').text(diffText);
-    $('#chz-situation-text').val(situationText);
+function showStep2() {
+    // Strip old situation block so user edits only the description prose
+    $('#chz-card-text').val(_originalDescription);
     $('#chz-turns').val(getSettings().turnsN);
     $('#chz-error-2').addClass('chz-hidden').text('');
-    setStep2Busy(false);
+    setSuggestionsLoading(true);
+    setSituationLoading(true);
     $('#chz-step-2').removeClass('chz-hidden');
 }
 
-function showStep2WithError(message) {
-    $('#chz-loading').addClass('chz-hidden');
-    $('#chz-step-2').removeClass('chz-hidden');
-    setStep2Busy(false);
-    $('#chz-card-diff').text('');
+// ─── Section Loading State ────────────────────────────────────────────────────
+
+function setSuggestionsLoading(isLoading) {
+    _suggestionsLoading = isLoading;
+    $('#chz-spin-suggestions').toggleClass('chz-hidden', !isLoading);
+    $('#chz-regen-suggestions').prop('disabled', isLoading);
+    if (isLoading) $('#chz-suggestions').empty();
+    updateConfirmState();
+}
+
+function setSituationLoading(isLoading) {
+    _situationLoading = isLoading;
+    $('#chz-spin-situation').toggleClass('chz-hidden', !isLoading);
+    $('#chz-regen-situation').prop('disabled', isLoading);
+    $('#chz-situation-text').prop('disabled', isLoading);
+    if (isLoading) $('#chz-situation-text').val('');
+    updateConfirmState();
+}
+
+function updateConfirmState() {
+    $('#chz-confirm').prop('disabled', _suggestionsLoading || _situationLoading);
+}
+
+function populateSuggestions(text) {
+    setSuggestionsLoading(false);
+    $('#chz-suggestions').html(formatBullets(text));
+}
+
+function populateSituation(text) {
+    setSituationLoading(false);
+    $('#chz-situation-text').val(text);
+}
+
+function showSuggestionsError(message) {
+    setSuggestionsLoading(false);
+    $('#chz-suggestions').html(`<span class="chz-error-inline">${escapeHtml(message)}</span>`);
+}
+
+function showSituationError(message) {
+    setSituationLoading(false);
     $('#chz-error-2').text(message).removeClass('chz-hidden');
 }
 
-function setStep2Busy(isBusy) {
-    $('#chz-back, #chz-regen, #chz-confirm, #chz-cancel-2').prop('disabled', isBusy);
+function formatBullets(text) {
+    const items = text.split('\n')
+        .map(l => l.replace(/^[\s\-\*•]+/, '').trim())
+        .filter(Boolean);
+    if (!items.length) return `<span>${escapeHtml(text)}</span>`;
+    return '<ul>' + items.map(l => `<li>${escapeHtml(l)}</li>`).join('') + '</ul>';
 }
 
 // ─── Event Handlers ───────────────────────────────────────────────────────────
@@ -435,70 +401,51 @@ async function onChapterizeClick() {
         return;
     }
 
-    const char           = context.characters[context.characterId];
-    _originalDescription = char.description ?? '';
+    const char = context.characters[context.characterId];
+
+    // Strip any existing situation block so the card editor shows only the prose.
+    const raw    = char.description ?? '';
+    const sepIdx = raw.indexOf('\n\n---\n\n');
+    _originalDescription = sepIdx !== -1 ? raw.slice(0, sepIdx) : raw;
     _transcript          = buildTranscript(messages);
 
     showModal();
-    showLoading('Generating digest...');
-    await runDigestCall();
+    showStep2();
+
+    // Fire both calls in parallel — each resolves into its own section.
+    runSuggestionsCall()
+        .then(populateSuggestions)
+        .catch(err => {
+            console.error('[Chapterize] Suggestions call failed:', err);
+            showSuggestionsError(`Generation failed: ${err.message}`);
+        });
+
+    runSituationCall()
+        .then(populateSituation)
+        .catch(err => {
+            console.error('[Chapterize] Situation call failed:', err);
+            showSituationError(`Situation generation failed: ${err.message}`);
+        });
 }
 
-async function runDigestCall() {
-    try {
-        const fore = interpolate(getSettings().digestPrompt, { transcript: _transcript });
-        const aft  = getSettings().digestPromptAft?.trim();
-        const prompt = aft ? `${fore}\n\n${aft}` : fore;
-        const digest = await generateRaw({ prompt, trimNames: false });
-        _digestContent = digest;
-        showStep1(digest);
-    } catch (err) {
-        console.error('[Chapterize] Digest generation failed:', err);
-        showStep1WithError(`Generation failed: ${err.message}`);
-    }
+function onRegenSuggestionsClick() {
+    setSuggestionsLoading(true);
+    runSuggestionsCall()
+        .then(populateSuggestions)
+        .catch(err => {
+            console.error('[Chapterize] Suggestions regen failed:', err);
+            showSuggestionsError(`Regeneration failed: ${err.message}`);
+        });
 }
 
-async function retryDigest() {
-    showLoading('Retrying...');
-    await runDigestCall();
-}
-
-async function onRegen1Click() {
-    setStep1Busy(true);
-    showLoading('Regenerating digest...');
-    await runDigestCall();
-}
-
-function setStep1Busy(isBusy) {
-    $('#chz-next, #chz-regen-1, #chz-cancel-1').prop('disabled', isBusy);
-}
-
-async function onNextClick() {
-    const editedDigest = $('#chz-digest').val();
-    _digestContent     = editedDigest;
-    $('#chz-next').prop('disabled', true);
-    showLoading('Generating character card and situation...');
-    await runAndShowStep2(editedDigest);
-}
-
-function onBackClick() {
-    showStep1(_digestContent);
-}
-
-async function onRegenClick() {
-    setStep2Busy(true);
-    showLoading('Regenerating...');
-    await runAndShowStep2(_digestContent);
-}
-
-async function runAndShowStep2(editedDigest) {
-    try {
-        const { cardText, situationText } = await runStep2Calls(editedDigest);
-        showStep2(cardText, situationText);
-    } catch (err) {
-        console.error('[Chapterize] Step 2 generation failed:', err);
-        showStep2WithError(`Generation failed: ${err.message}. Edit the fields manually or use Regenerate.`);
-    }
+function onRegenSituationClick() {
+    setSituationLoading(true);
+    runSituationCall()
+        .then(populateSituation)
+        .catch(err => {
+            console.error('[Chapterize] Situation regen failed:', err);
+            showSituationError(`Regeneration failed: ${err.message}`);
+        });
 }
 
 async function onConfirmClick() {
@@ -507,17 +454,14 @@ async function onConfirmClick() {
     const rawTurns      = parseInt($('#chz-turns').val(), 10);
     const turnsToCarry  = Math.max(MIN_TURNS, Math.min(MAX_TURNS, isNaN(rawTurns) ? DEFAULT_TURNS_N : rawTurns));
 
-    // Last-resort guard: the card prompt instructs the model to exclude the old situation
-    // block (separated by \n\n---\n\n), but strip it here in case of partial compliance.
-    // Using \n\n---\n\n as the target to reduce the chance of clipping a legitimate markdown
-    // thematic break that lacks a trailing blank line, though this is not a full guarantee.
+    // Last-resort guard: strip any situation block the user may have left in
+    // the description textarea (e.g. pasted from outside).
     const separatorIndex = cardText.indexOf('\n\n---\n\n');
     if (separatorIndex !== -1) {
         cardText = cardText.slice(0, separatorIndex);
     }
 
-    setStep2Busy(true);
-    showLoading('Saving...');
+    $('#chz-confirm, #chz-cancel-2').prop('disabled', true);
 
     const context        = SillyTavern.getContext();
     const char           = context.characters[context.characterId];
@@ -525,10 +469,9 @@ async function onConfirmClick() {
     const lastN          = buildLastN(context.chat, turnsToCarry);
 
     // Both operations start immediately and run in parallel.
-    // Awaited separately so we can attribute errors precisely.
     const charSavePromise    = saveCharacter(char, newDescription);
     const chapterNamePromise = deriveChapterName(char.avatar);
-    chapterNamePromise.catch(() => {}); // Prevent unhandled rejection if it fails before charSavePromise settles
+    chapterNamePromise.catch(() => {}); // Prevent unhandled rejection before charSavePromise settles
 
     let isCharacterSaved = false;
     let chapterName;
@@ -539,17 +482,18 @@ async function onConfirmClick() {
         chapterName = await chapterNamePromise;
     } catch (err) {
         const suffix = isCharacterSaved ? ' (Character card was already saved.)' : '';
-        showStep2WithError(`${err.message}${suffix}`);
+        $('#chz-error-2').text(`${err.message}${suffix}`).removeClass('chz-hidden');
+        $('#chz-confirm, #chz-cancel-2').prop('disabled', false);
         return;
     }
 
-    // Persist changelog after chapterName is known, before remaining writes
-    persistChangelog(chapterName, _digestContent);
+    persistChangelog(chapterName);
 
     try {
         await saveNewChat(char, chapterName, context.chatMetadata, lastN);
     } catch (err) {
-        showStep2WithError(`${err.message} The character card has already been saved.`);
+        $('#chz-error-2').text(`${err.message} The character card has already been saved.`).removeClass('chz-hidden');
+        $('#chz-confirm, #chz-cancel-2').prop('disabled', false);
         return;
     }
 
@@ -600,32 +544,38 @@ function buildSettingsHtml() {
       </div>
 
       <div class="chz-settings-row">
-        <label for="chz-set-prompt-digest">Digest prompt (before transcript)</label>
-        <textarea id="chz-set-prompt-digest" class="chz-settings-textarea">${escapeHtml(s.digestPrompt)}</textarea>
-      </div>
-
-      <div class="chz-settings-row">
-        <label for="chz-set-prompt-digest-aft">Digest prompt (after transcript)</label>
-        <textarea id="chz-set-prompt-digest-aft" class="chz-settings-textarea">${escapeHtml(s.digestPromptAft)}</textarea>
-      </div>
-
-      <div class="chz-settings-row">
-        <label for="chz-set-prompt-card">Character Card prompt (before content)</label>
+        <div class="chz-settings-label-row">
+          <label for="chz-set-prompt-card">Card/Suggestions prompt (before content)</label>
+          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
+                  data-target="chz-set-prompt-card" data-key="cardPrompt">Reset</button>
+        </div>
         <textarea id="chz-set-prompt-card" class="chz-settings-textarea">${escapeHtml(s.cardPrompt)}</textarea>
       </div>
 
       <div class="chz-settings-row">
-        <label for="chz-set-prompt-card-aft">Character Card prompt (after content)</label>
+        <div class="chz-settings-label-row">
+          <label for="chz-set-prompt-card-aft">Card/Suggestions prompt (after content)</label>
+          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
+                  data-target="chz-set-prompt-card-aft" data-key="cardPromptAft">Reset</button>
+        </div>
         <textarea id="chz-set-prompt-card-aft" class="chz-settings-textarea">${escapeHtml(s.cardPromptAft)}</textarea>
       </div>
 
       <div class="chz-settings-row">
-        <label for="chz-set-prompt-situation">Situation Summary prompt (before content)</label>
+        <div class="chz-settings-label-row">
+          <label for="chz-set-prompt-situation">Situation prompt (before content)</label>
+          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
+                  data-target="chz-set-prompt-situation" data-key="situationPrompt">Reset</button>
+        </div>
         <textarea id="chz-set-prompt-situation" class="chz-settings-textarea">${escapeHtml(s.situationPrompt)}</textarea>
       </div>
 
       <div class="chz-settings-row">
-        <label for="chz-set-prompt-situation-aft">Situation Summary prompt (after content)</label>
+        <div class="chz-settings-label-row">
+          <label for="chz-set-prompt-situation-aft">Situation prompt (after content)</label>
+          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
+                  data-target="chz-set-prompt-situation-aft" data-key="situationPromptAft">Reset</button>
+        </div>
         <textarea id="chz-set-prompt-situation-aft" class="chz-settings-textarea">${escapeHtml(s.situationPromptAft)}</textarea>
       </div>
 
@@ -648,16 +598,6 @@ function bindSettingsHandlers() {
         saveSettingsDebounced();
     });
 
-    $('#chz-set-prompt-digest').on('input', () => {
-        getSettings().digestPrompt = $('#chz-set-prompt-digest').val();
-        saveSettingsDebounced();
-    });
-
-    $('#chz-set-prompt-digest-aft').on('input', () => {
-        getSettings().digestPromptAft = $('#chz-set-prompt-digest-aft').val();
-        saveSettingsDebounced();
-    });
-
     $('#chz-set-prompt-card').on('input', () => {
         getSettings().cardPrompt = $('#chz-set-prompt-card').val();
         saveSettingsDebounced();
@@ -675,6 +615,15 @@ function bindSettingsHandlers() {
 
     $('#chz-set-prompt-situation-aft').on('input', () => {
         getSettings().situationPromptAft = $('#chz-set-prompt-situation-aft').val();
+        saveSettingsDebounced();
+    });
+
+    $('.chz-reset-btn').on('click', function () {
+        const targetId   = $(this).data('target');
+        const key        = $(this).data('key');
+        const defaultVal = SETTINGS_DEFAULTS[key];
+        $(`#${targetId}`).val(defaultVal);
+        getSettings()[key] = defaultVal;
         saveSettingsDebounced();
     });
 }
