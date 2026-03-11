@@ -37,31 +37,56 @@ const MIN_TURNS       = 1;
 const MAX_TURNS       = 10;
 const DEFAULT_TURNS_N = 4;
 
-const DEFAULT_CARD_PROMPT = `You are a narrative consultant.
+const DEFAULT_CARD_PROMPT = `
+TASK:
+1. Examine the CHARACTER DESCRIPTION for specific facts (age, health, relations, location).
+2. Examine the transcript for changes to those facts.
+3. Update the existing prose ONLY where facts have changed or a major status shift (like an injury or new possession) has occurred.
+4. Maintain the exact existing structure, headers (━━━━━━━━), and formatting.
 
-Review the CHARACTER DESCRIPTION and the SESSION TRANSCRIPT.
-Identify 3-5 specific factual updates that should be made to the character card to reflect the new state of the world (e.g., injuries, changed relationships, deaths, new titles, location changes).
+CONSTRAINTS:
+- DO NOT invent new categories (e.g., "Update Status").
+- DO NOT rewrite paragraphs that are still factually accurate. 
+- People change slowly; keep edits minimal and integrated into the current prose style.
+- If no changes are needed, return the description as-is.
 
-Format as a simple bulleted list. Be specific and concise.
+OUTPUT FORMAT:
+[Updated Description]
+---CHANGES---
+[A 3 to 5 point list of what you edited and why]
 
 CHARACTER DESCRIPTION:
 {{original_description}}
 
 SESSION TRANSCRIPT:
-{{transcript}}`;
+{{transcript}}
 
-const DEFAULT_CARD_PROMPT_AFT = `REMINDER: Your task is to make the smallest possible edit to the character description above. Do not rewrite. Do not improve. Do not polish. Return the complete description with only what is factually wrong or critically missing corrected, followed by ---CHANGES--- and a line diff. If nothing needed changing, return it unchanged followed by ---CHANGES--- and "No changes."`;
 
-const DEFAULT_SITUATION_PROMPT = `You are writing the situation summary for the opening of the next session of a collaborative fiction story. This will be inserted into the character card and read by the AI at the start of the next session as a replacement for the full session — grounding it in where the story stands without replaying what happened.
+`;
 
-Below is a session transcript.
+const DEFAULT_CARD_PROMPT_AFT = `
+Provide a concise bulleted list of suggested edits. 
+Each bullet should follow the format: "Update [Section] to reflect [New Fact]." 
+Do not rewrite the description yourself; only provide the instructions for the user.
+`;
 
-Write in present tense. Be specific — name the location, who is present, what is unresolved, what the emotional temperature is. Aim for 200-500 words. Do not narrate. Do not editorialize. Do not add preamble. Output only the summary text.
+const DEFAULT_SITUATION_PROMPT = `
+[SYSTEM: TASK - STORY CHRONICLER]
+Analyze the provided TRANSCRIPT to update the narrative state. Write a concise, comprehensive situation summary (200-500 words) using the following guidelines:
 
-SESSION TRANSCRIPT:
-{{transcript}}`;
+1. TONE & STYLE: Adopt the prose style, vocabulary, and emotional weight of the transcript. If the story is gritty, be blunt; if it is whimsical, be descriptive.
+2. PLOT STATE: Identify the current location and immediate physical stakes. Detail what has just been accomplished and, crucially, what "ticking clocks" or unresolved threats remain "hanging in the air."
+3. CHARACTER DYNAMICS: Focus on internal shifts. Note new realizations, changes in trust, or veiled intentions that were exposed.
+4. FORMAT: Write in the present tense. Use a single fluid narrative or organized paragraphs. Avoid bullet points to keep the summary immersive for the next generation.
 
-const DEFAULT_SITUATION_PROMPT_AFT = `REMINDER: Your task is to write a 200-500 word situation summary in present tense. Do not narrate. Do not editorialize. Do not add preamble. Output only the summary text.`;
+Constraints: No preamble. No "This is a summary." No editorializing. 
+TRANSCRIPT:
+{{transcript}}
+`;
+
+const DEFAULT_SITUATION_PROMPT_AFT = `
+REMINDER: You are an objective chronicler. Summarize the narrative state; do not continue the roleplay or narrate future events. Focus on the 'Unresolved Threads' and 'Character Realizations'. Output only the summary text in present tense (200-500 words).
+`;
 
 const SETTINGS_DEFAULTS = Object.freeze({
     turnsN:             DEFAULT_TURNS_N,
