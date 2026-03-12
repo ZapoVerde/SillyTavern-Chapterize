@@ -12,7 +12,8 @@
     --chz-modal-bg:           var(--black-tinted, #1a1a2e);
     --chz-modal-border:       var(--border-color-light, #444);
     --chz-modal-radius:       8px;
-    --chz-modal-width:        580px;
+    --chz-modal-min-width:    640px;
+    --chz-modal-max-width:    90vw;
     --chz-modal-max-h:        90vh;
     --chz-modal-pad:          20px;
     --chz-gap:                12px;
@@ -69,8 +70,8 @@
     background: var(--chz-modal-bg);
     border: 1px solid var(--chz-modal-border);
     border-radius: var(--chz-modal-radius);
-    width: var(--chz-modal-width);
-    max-width: 95vw;
+    min-width: var(--chz-modal-min-width);
+    max-width: var(--chz-modal-max-width);
     max-height: var(--chz-modal-max-h);
     overflow-y: auto;
     padding: var(--chz-modal-pad);

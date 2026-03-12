@@ -33,7 +33,7 @@ import { extension_settings } from '../../../extensions.js';
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const EXT_NAME        = 'chapterize';
-const SITUATION_SEP   = '\n\n***---SITUATION---***\n\n';
+const SITUATION_SEP   = '\n\n*** Chapterize Divider — Do Not Edit ***\n\n';
 const MIN_TURNS       = 1;
 const MAX_TURNS       = 10;
 const DEFAULT_TURNS_N = 4;
@@ -109,6 +109,7 @@ let _situationLoading    = false;
 let _isChapterMode       = false;   // true when current char already has a (ChX) suffix
 let _nextChNum           = 1;       // chapter number to assign on next chapterize
 let _cloneName           = '';      // display name for the chapter card (e.g. "CharName (Ch2)")
+let _generationId        = 0;       // incremented on each new invocation; guards stale promise callbacks
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
@@ -179,6 +180,36 @@ function parseChapter(name) {
     return { isChapter: true, baseName: m[1], chNum: parseInt(m[2], 10) };
 }
 
+// ─── Character Form Data ──────────────────────────────────────────────────────
+
+/**
+ * Builds a FormData populated with the character fields that are common to both
+ * /api/characters/create and /api/characters/edit. Callers append their own
+ * endpoint-specific fields afterward.
+ * @param {object} char      - character object to source fields from
+ * @param {object} overrides - optional { name?, description? } to override char's values
+ */
+function buildCharacterFormData(char, overrides = {}) {
+    const name        = overrides.name        ?? char.name;
+    const description = overrides.description ?? char.description;
+
+    const formData = new FormData();
+    formData.append('ch_name',                   name);
+    formData.append('description',               description);
+    formData.append('personality',               char.personality                     ?? '');
+    formData.append('scenario',                  char.scenario                        ?? '');
+    formData.append('first_mes',                 char.first_mes                       ?? '');
+    formData.append('mes_example',               char.mes_example                     ?? '');
+    formData.append('creator_notes',             char.data?.creator_notes             ?? '');
+    formData.append('system_prompt',             char.data?.system_prompt             ?? '');
+    formData.append('post_history_instructions', char.data?.post_history_instructions ?? '');
+    formData.append('tags',                      JSON.stringify(char.tags             ?? []));
+    formData.append('creator',                   char.data?.creator                   ?? '');
+    formData.append('character_version',         char.data?.character_version         ?? '');
+    formData.append('alternate_greetings',       JSON.stringify(char.data?.alternate_greetings ?? []));
+    return formData;
+}
+
 // ─── Character Clone ──────────────────────────────────────────────────────────
 
 /**
@@ -187,20 +218,16 @@ function parseChapter(name) {
  * that the server assigned (plain text, e.g. "CharName_.png").
  */
 async function createCharacterClone(sourceChar, cloneName, newDescription) {
-    const formData = new FormData();
-    formData.append('ch_name',                   cloneName);
-    formData.append('description',               newDescription);
-    formData.append('personality',               sourceChar.personality                     ?? '');
-    formData.append('scenario',                  sourceChar.scenario                        ?? '');
-    formData.append('first_mes',                 sourceChar.first_mes                       ?? '');
-    formData.append('mes_example',               sourceChar.mes_example                     ?? '');
-    formData.append('creator_notes',             sourceChar.data?.creator_notes             ?? '');
-    formData.append('system_prompt',             sourceChar.data?.system_prompt             ?? '');
-    formData.append('post_history_instructions', sourceChar.data?.post_history_instructions ?? '');
-    formData.append('tags',                      JSON.stringify(sourceChar.tags             ?? []));
-    formData.append('creator',                   sourceChar.data?.creator                   ?? '');
-    formData.append('character_version',         sourceChar.data?.character_version         ?? '');
-    formData.append('alternate_greetings',       JSON.stringify(sourceChar.data?.alternate_greetings ?? []));
+    const formData = buildCharacterFormData(sourceChar, { name: cloneName, description: newDescription });
+
+    // Copy the source avatar image so the clone inherits the same portrait.
+    try {
+        const imgRes = await fetch(`/characters/${sourceChar.avatar}`);
+        if (imgRes.ok) {
+            const blob = await imgRes.blob();
+            formData.append('avatar', blob, sourceChar.avatar);
+        }
+    } catch (_) { /* non-fatal — clone will get a default avatar */ }
 
     const headers = getRequestHeaders();
     delete headers['Content-Type'];
@@ -221,24 +248,11 @@ async function saveCharacter(char, newDescription, newName = null) {
     updated.description = newDescription;
     if (newName) updated.name = newName;
 
-    const formData = new FormData();
-    formData.append('json_data',                 JSON.stringify(updated));
-    formData.append('avatar_url',                updated.avatar);
-    formData.append('ch_name',                   updated.name);
-    formData.append('description',               updated.description);
-    formData.append('personality',               updated.personality                     ?? '');
-    formData.append('scenario',                  updated.scenario                        ?? '');
-    formData.append('first_mes',                 updated.first_mes                       ?? '');
-    formData.append('mes_example',               updated.mes_example                     ?? '');
-    formData.append('creator_notes',             updated.data?.creator_notes             ?? '');
-    formData.append('system_prompt',             updated.data?.system_prompt             ?? '');
-    formData.append('post_history_instructions', updated.data?.post_history_instructions ?? '');
-    formData.append('tags',                      JSON.stringify(updated.tags             ?? []));
-    formData.append('creator',                   updated.data?.creator                   ?? '');
-    formData.append('character_version',         updated.data?.character_version         ?? '');
-    formData.append('alternate_greetings',       JSON.stringify(updated.data?.alternate_greetings ?? []));
-    formData.append('chat',                      updated.chat);
-    formData.append('create_date',               updated.create_date);
+    const formData = buildCharacterFormData(updated);
+    formData.append('json_data',   JSON.stringify(updated));
+    formData.append('avatar_url',  updated.avatar);
+    formData.append('chat',        updated.chat);
+    formData.append('create_date', updated.create_date);
 
     const headers = getRequestHeaders();
     delete headers['Content-Type']; // browser must set multipart boundary
@@ -395,13 +409,12 @@ function injectModal() {
 }
 
 function showModal() {
-    const sheldWidth = $('#sheld').outerWidth();
-    if (sheldWidth) $('#chz-modal').css('width', sheldWidth + 'px');
     $('#chz-overlay').removeClass('chz-hidden');
 }
 
 function closeModal() {
     $('#chz-overlay').addClass('chz-hidden');
+    _generationId++;
     _transcript          = '';
     _originalDescription = '';
     _suggestionsLoading  = false;
@@ -504,17 +517,23 @@ async function onChapterizeClick() {
     showModal();
     showStep2();
 
+    // Capture the generation ID for this invocation so that stale callbacks
+    // from a previous invocation that is still in flight are silently dropped.
+    const genId = ++_generationId;
+
     // Fire both calls in parallel — each resolves into its own section.
     runSuggestionsCall()
-        .then(populateSuggestions)
+        .then(text => { if (_generationId !== genId) return; populateSuggestions(text); })
         .catch(err => {
+            if (_generationId !== genId) return;
             console.error('[Chapterize] Suggestions call failed:', err);
             showSuggestionsError(`Generation failed: ${err.message}`);
         });
 
     runSituationCall()
-        .then(populateSituation)
+        .then(text => { if (_generationId !== genId) return; populateSituation(text); })
         .catch(err => {
+            if (_generationId !== genId) return;
             console.error('[Chapterize] Situation call failed:', err);
             showSituationError(`Situation generation failed: ${err.message}`);
         });
@@ -522,9 +541,11 @@ async function onChapterizeClick() {
 
 function onRegenSuggestionsClick() {
     setSuggestionsLoading(true);
+    const genId = _generationId;
     runSuggestionsCall()
-        .then(populateSuggestions)
+        .then(text => { if (_generationId !== genId) return; populateSuggestions(text); })
         .catch(err => {
+            if (_generationId !== genId) return;
             console.error('[Chapterize] Suggestions regen failed:', err);
             showSuggestionsError(`Regeneration failed: ${err.message}`);
         });
@@ -532,9 +553,11 @@ function onRegenSuggestionsClick() {
 
 function onRegenSituationClick() {
     setSituationLoading(true);
+    const genId = _generationId;
     runSituationCall()
-        .then(populateSituation)
+        .then(text => { if (_generationId !== genId) return; populateSituation(text); })
         .catch(err => {
+            if (_generationId !== genId) return;
             console.error('[Chapterize] Situation regen failed:', err);
             showSituationError(`Regeneration failed: ${err.message}`);
         });
@@ -571,13 +594,21 @@ async function onConfirmClick() {
 
         let isCharacterSaved = false;
         let chapterName;
+        let freshChar;
 
         try {
             await charSavePromise;
             isCharacterSaved = true;
-            char.name        = _cloneName;   // sync in-memory display name
-            char.description = newDescription;
-            if (char.data) { char.data.name = _cloneName; char.data.description = newDescription; }
+            // Reload character list so ST's in-memory state reflects the renamed card;
+            // then re-select by avatar — mirrors what the clone path does.
+            await getCharacters();
+            const freshContext = SillyTavern.getContext();
+            const updatedIdx   = freshContext.characters.findIndex(c => c.avatar === char.avatar);
+            if (updatedIdx === -1) {
+                throw new Error('Character was saved but could not be located after reload.');
+            }
+            await selectCharacterById(updatedIdx);
+            freshChar   = SillyTavern.getContext().characters[updatedIdx];
             chapterName = await chapterNamePromise;
         } catch (err) {
             const suffix = isCharacterSaved ? ' (Character card was already saved.)' : '';
@@ -589,7 +620,7 @@ async function onConfirmClick() {
         persistChangelog(chapterName);
 
         try {
-            await saveNewChat(char, chapterName, context.chatMetadata, lastN);
+            await saveNewChat(freshChar, chapterName, context.chatMetadata, lastN);
         } catch (err) {
             $('#chz-error-2').text(`${err.message} The character card has already been saved.`).removeClass('chz-hidden');
             $('#chz-confirm, #chz-cancel-2').prop('disabled', false);
