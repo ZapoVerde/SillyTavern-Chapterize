@@ -57,7 +57,13 @@
 
 .chz-overlay {
     position: fixed;
-    inset: 0;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
     background: var(--chz-overlay-bg);
     z-index: var(--chz-z-modal);
     display: flex;
@@ -348,10 +354,12 @@
 @media (max-width: 600px) {
     :root {
         --chz-modal-pad: 12px;
+        --chz-modal-width: 100%;
+        --chz-modal-radius: 0px;
     }
 
     .chz-overlay {
-        padding: 12px;
+        padding: 12px 0 0;
     }
 
     .chz-turns-row {
