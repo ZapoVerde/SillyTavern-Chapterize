@@ -14,7 +14,6 @@
     --chz-modal-radius:       8px;
     --chz-modal-min-width:    min(640px, 100vw);
     --chz-modal-max-width:    92vw;
-    --chz-modal-max-h:        90vh;
     --chz-modal-pad:          20px;
     --chz-gap:                12px;
     --chz-gap-sm:             6px;
@@ -62,9 +61,11 @@
     background: var(--chz-overlay-bg);
     z-index: var(--chz-z-modal);
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: center;
     overflow-y: auto;
+    padding: 40px 20px;
+    box-sizing: border-box;
 }
 
 .chz-modal {
@@ -73,8 +74,7 @@
     border-radius: var(--chz-modal-radius);
     min-width: var(--chz-modal-min-width);
     max-width: var(--chz-modal-max-width);
-    max-height: var(--chz-modal-max-h);
-    overflow-y: auto;
+    width: 100%;
     padding: var(--chz-modal-pad);
     display: flex;
     flex-direction: column;
@@ -348,18 +348,12 @@
 
 @media (max-width: 600px) {
     :root {
-        --chz-modal-pad:      12px;
-        --chz-modal-max-h:    none;
-        --chz-modal-max-width: 98vw;
+        --chz-modal-pad:       12px;
+        --chz-modal-max-width: 100%;
     }
 
     .chz-overlay {
-        align-items: flex-start;
-        padding: 12px 0;
-    }
-
-    .chz-modal {
-        max-height: none;
+        padding: 12px;
     }
 
     .chz-turns-row {
