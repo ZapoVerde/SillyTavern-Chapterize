@@ -27,7 +27,7 @@
  *     external_io: https_apis # generateRaw (LLM) and ST /api/* endpoints.
  */
 
-import { generateRaw, saveSettingsDebounced, getRequestHeaders, openCharacterChat } from '../../../../script.js';
+import { generateRaw, saveSettingsDebounced, getRequestHeaders, openCharacterChat, getCharacters, selectCharacterById } from '../../../../script.js';
 import { extension_settings } from '../../../extensions.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -106,6 +106,9 @@ let _transcript          = '';
 let _originalDescription = '';
 let _suggestionsLoading  = false;
 let _situationLoading    = false;
+let _isChapterMode       = false;   // true when current char already has a (ChX) suffix
+let _nextChNum           = 1;       // chapter number to assign on next chapterize
+let _cloneName           = '';      // display name for the chapter card (e.g. "CharName (Ch2)")
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
@@ -162,11 +165,61 @@ async function runSituationCall() {
     return generateRaw({ prompt, trimNames: false });
 }
 
+// ─── Chapter-Character Detection ──────────────────────────────────────────────
+
+const CHAPTER_RE = /^(.+?)\s\(Ch(\d+)\)$/i;
+
+/**
+ * Parses a character name for a (ChX) suffix.
+ * Returns { isChapter, baseName, chNum } where chNum is 0 for non-chapter chars.
+ */
+function parseChapter(name) {
+    const m = name.match(CHAPTER_RE);
+    if (!m) return { isChapter: false, baseName: name, chNum: 0 };
+    return { isChapter: true, baseName: m[1], chNum: parseInt(m[2], 10) };
+}
+
+// ─── Character Clone ──────────────────────────────────────────────────────────
+
+/**
+ * Creates a new character named `cloneName` with all fields copied from
+ * `sourceChar` but with `newDescription`. Returns the avatar filename string
+ * that the server assigned (plain text, e.g. "CharName_.png").
+ */
+async function createCharacterClone(sourceChar, cloneName, newDescription) {
+    const formData = new FormData();
+    formData.append('ch_name',                   cloneName);
+    formData.append('description',               newDescription);
+    formData.append('personality',               sourceChar.personality                     ?? '');
+    formData.append('scenario',                  sourceChar.scenario                        ?? '');
+    formData.append('first_mes',                 sourceChar.first_mes                       ?? '');
+    formData.append('mes_example',               sourceChar.mes_example                     ?? '');
+    formData.append('creator_notes',             sourceChar.data?.creator_notes             ?? '');
+    formData.append('system_prompt',             sourceChar.data?.system_prompt             ?? '');
+    formData.append('post_history_instructions', sourceChar.data?.post_history_instructions ?? '');
+    formData.append('tags',                      JSON.stringify(sourceChar.tags             ?? []));
+    formData.append('creator',                   sourceChar.data?.creator                   ?? '');
+    formData.append('character_version',         sourceChar.data?.character_version         ?? '');
+    formData.append('alternate_greetings',       JSON.stringify(sourceChar.data?.alternate_greetings ?? []));
+
+    const headers = getRequestHeaders();
+    delete headers['Content-Type'];
+
+    const res = await fetch('/api/characters/create', {
+        method: 'POST',
+        headers,
+        body:   formData,
+    });
+    if (!res.ok) throw new Error(`Character clone failed (HTTP ${res.status})`);
+    return res.text(); // plain-text avatar filename, e.g. "CharName_.png"
+}
+
 // ─── Character Save ───────────────────────────────────────────────────────────
 
-async function saveCharacter(char, newDescription) {
+async function saveCharacter(char, newDescription, newName = null) {
     const updated = structuredClone(char);
     updated.description = newDescription;
+    if (newName) updated.name = newName;
 
     const formData = new FormData();
     formData.append('json_data',                 JSON.stringify(updated));
@@ -353,6 +406,9 @@ function closeModal() {
     _originalDescription = '';
     _suggestionsLoading  = false;
     _situationLoading    = false;
+    _isChapterMode       = false;
+    _nextChNum           = 1;
+    _cloneName           = '';
 }
 
 function showStep2() {
@@ -362,6 +418,8 @@ function showStep2() {
     $('#chz-error-2').addClass('chz-hidden').text('');
     setSuggestionsLoading(true);
     setSituationLoading(true);
+    const titleText = _isChapterMode ? `Update to ${_cloneName}` : `Create ${_cloneName}`;
+    $('#chz-step-2 .chz-title').text(titleText);
     $('#chz-step-2').removeClass('chz-hidden');
 }
 
@@ -430,6 +488,13 @@ async function onChapterizeClick() {
 
     const char = context.characters[context.characterId];
 
+    const parsed   = parseChapter(char.name);
+    _isChapterMode = parsed.isChapter;
+    _nextChNum     = parsed.chNum + 1;
+    _cloneName     = parsed.isChapter
+        ? `${parsed.baseName} (Ch${_nextChNum})`
+        : `${char.name} (Ch1)`;
+
     // Strip any existing situation block so the card editor shows only the prose.
     const raw    = char.description ?? '';
     const sepIdx = raw.indexOf(SITUATION_SEP);
@@ -495,47 +560,107 @@ async function onConfirmClick() {
     const newDescription = `${cardText}${SITUATION_SEP}${situationText}`;
     const lastN          = buildLastN(context.chat, turnsToCarry);
 
-    // Both operations start immediately and run in parallel.
-    const charSavePromise    = saveCharacter(char, newDescription);
-    const chapterNamePromise = deriveChapterName(char.avatar);
-    chapterNamePromise.catch(() => {}); // Prevent unhandled rejection before charSavePromise settles
+    if (_isChapterMode) {
+        // ── Chapter card: update description AND bump display name in place ──
+        // The avatar file (and all its chats) stays the same; only the display
+        // name embedded in the PNG metadata changes (e.g. "(Ch2)" → "(Ch3)").
 
-    let isCharacterSaved = false;
-    let chapterName;
+        const charSavePromise    = saveCharacter(char, newDescription, _cloneName);
+        const chapterNamePromise = deriveChapterName(char.avatar);
+        chapterNamePromise.catch(() => {});
 
-    try {
-        await charSavePromise;
-        isCharacterSaved = true;
-        char.description = newDescription; // sync in-memory state with what was saved
-        if (char.data) char.data.description = newDescription;
-        chapterName = await chapterNamePromise;
-    } catch (err) {
-        const suffix = isCharacterSaved ? ' (Character card was already saved.)' : '';
-        $('#chz-error-2').text(`${err.message}${suffix}`).removeClass('chz-hidden');
-        $('#chz-confirm, #chz-cancel-2').prop('disabled', false);
-        return;
-    }
+        let isCharacterSaved = false;
+        let chapterName;
 
-    persistChangelog(chapterName);
+        try {
+            await charSavePromise;
+            isCharacterSaved = true;
+            char.name        = _cloneName;   // sync in-memory display name
+            char.description = newDescription;
+            if (char.data) { char.data.name = _cloneName; char.data.description = newDescription; }
+            chapterName = await chapterNamePromise;
+        } catch (err) {
+            const suffix = isCharacterSaved ? ' (Character card was already saved.)' : '';
+            $('#chz-error-2').text(`${err.message}${suffix}`).removeClass('chz-hidden');
+            $('#chz-confirm, #chz-cancel-2').prop('disabled', false);
+            return;
+        }
 
-    try {
-        await saveNewChat(char, chapterName, context.chatMetadata, lastN);
-    } catch (err) {
-        $('#chz-error-2').text(`${err.message} The character card has already been saved.`).removeClass('chz-hidden');
-        $('#chz-confirm, #chz-cancel-2').prop('disabled', false);
-        return;
-    }
+        persistChangelog(chapterName);
 
-    try {
-        await openCharacterChat(chapterName);
-    } catch (err) {
-        console.error('[Chapterize] openCharacterChat failed:', err);
+        try {
+            await saveNewChat(char, chapterName, context.chatMetadata, lastN);
+        } catch (err) {
+            $('#chz-error-2').text(`${err.message} The character card has already been saved.`).removeClass('chz-hidden');
+            $('#chz-confirm, #chz-cancel-2').prop('disabled', false);
+            return;
+        }
+
+        try {
+            await openCharacterChat(chapterName);
+        } catch (err) {
+            console.error('[Chapterize] openCharacterChat failed:', err);
+            closeModal();
+            toastr.warning("Chapter created. Could not auto-open — open it manually from the character's chat list.");
+            return;
+        }
+
         closeModal();
-        toastr.warning("Chapter created. Could not auto-open — open it manually from the character's chat list.");
-        return;
-    }
 
-    closeModal();
+    } else {
+        // ── Original character: clone it as "CharName (Ch1)" ─────────────────
+
+        const cloneName = _cloneName || `${char.name} (Ch1)`;
+
+        let cloneAvatarUrl;
+        try {
+            cloneAvatarUrl = await createCharacterClone(char, cloneName, newDescription);
+        } catch (err) {
+            $('#chz-error-2').text(err.message).removeClass('chz-hidden');
+            $('#chz-confirm, #chz-cancel-2').prop('disabled', false);
+            return;
+        }
+
+        // Refresh the character list so the clone is visible and selectable.
+        await getCharacters();
+        const freshContext = SillyTavern.getContext();
+        const newCharIdx   = freshContext.characters.findIndex(c => c.avatar === cloneAvatarUrl);
+        if (newCharIdx === -1) {
+            $('#chz-error-2')
+                .text(`Created ${cloneName} but could not locate it in the character list. Please select it manually.`)
+                .removeClass('chz-hidden');
+            $('#chz-confirm, #chz-cancel-2').prop('disabled', false);
+            return;
+        }
+
+        const cloneChar   = freshContext.characters[newCharIdx];
+        const chapterName = await deriveChapterName(cloneAvatarUrl);
+
+        persistChangelog(chapterName);
+
+        try {
+            await saveNewChat(cloneChar, chapterName, context.chatMetadata, lastN);
+        } catch (err) {
+            $('#chz-error-2')
+                .text(`${err.message} Character ${cloneName} was created but the chat could not be saved.`)
+                .removeClass('chz-hidden');
+            $('#chz-confirm, #chz-cancel-2').prop('disabled', false);
+            return;
+        }
+
+        try {
+            await selectCharacterById(newCharIdx);
+            await openCharacterChat(chapterName);
+        } catch (err) {
+            console.error('[Chapterize] Character switch failed:', err);
+            closeModal();
+            toastr.warning(`${cloneName} created. Select it from the character list and open chat "${chapterName}".`);
+
+            return;
+        }
+
+        closeModal();
+    }
 }
 
 // ─── Settings Panel ───────────────────────────────────────────────────────────
