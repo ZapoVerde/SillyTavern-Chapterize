@@ -35,7 +35,7 @@
  *     external_io: https_apis # generateRaw (LLM) and ST /api/* endpoints.
  */
 
-import { generateRaw, saveSettingsDebounced, getRequestHeaders, openCharacterChat, getCharacters, selectCharacterById } from '../../../../script.js';
+import { generateRaw, saveSettingsDebounced, getRequestHeaders, openCharacterChat, getCharacters, selectCharacterById, eventSource, event_types } from '../../../../script.js';
 import { extension_settings } from '../../../extensions.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -469,6 +469,8 @@ async function lbSaveLorebook(name, data) {
         body:    JSON.stringify({ name, data }),
     });
     if (!res.ok) throw new Error(`Lorebook save failed (HTTP ${res.status})`);
+    // Notify ST's world info module so the editor refreshes without an app reload
+    await eventSource.emit(event_types.WORLDINFO_UPDATED, name, data);
 }
 
 /**
