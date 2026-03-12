@@ -12,8 +12,8 @@
     --chz-modal-bg:           var(--black-tinted, #1a1a2e);
     --chz-modal-border:       var(--border-color-light, #444);
     --chz-modal-radius:       8px;
-    --chz-modal-min-width:    640px;
-    --chz-modal-max-width:    90vw;
+    --chz-modal-min-width:    min(640px, 100vw);
+    --chz-modal-max-width:    92vw;
     --chz-modal-max-h:        90vh;
     --chz-modal-pad:          20px;
     --chz-gap:                12px;
@@ -341,4 +341,18 @@
 .chz-settings-row input[type="number"]:focus {
     outline: none;
     border-color: var(--chz-btn-primary-bg);
+}
+
+/* ─── Mobile ──────────────────────────────────────────────────────────────── */
+
+@media (max-width: 600px) {
+    :root {
+        --chz-modal-pad:   12px;
+        --chz-modal-max-h: 95vh;
+        --chz-modal-max-width: 98vw;
+    }
+
+    .chz-turns-row {
+        flex-wrap: wrap;
+    }
 }
