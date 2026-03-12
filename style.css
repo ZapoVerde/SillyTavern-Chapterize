@@ -349,6 +349,66 @@
     border-color: var(--chz-btn-primary-bg);
 }
 
+/* ─── Tab Bar ────────────────────────────────────────────────────────────── */
+
+.chz-tab-bar {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid var(--chz-modal-border);
+    margin-bottom: 4px;
+}
+
+.chz-tab-btn {
+    padding: 5px 14px;
+    border-radius: var(--chz-btn-radius) var(--chz-btn-radius) 0 0;
+    cursor: pointer;
+    font-size: var(--chz-btn-font);
+    border: 1px solid transparent;
+    border-bottom: none;
+    background: transparent;
+    color: var(--chz-text-muted);
+    transition: color 0.15s ease, background 0.15s ease;
+}
+
+.chz-tab-btn:hover {
+    color: var(--chz-text);
+}
+
+.chz-tab-active {
+    background: var(--chz-modal-bg);
+    color: var(--chz-text);
+    border-color: var(--chz-modal-border);
+    position: relative;
+    bottom: -1px;
+}
+
+.chz-tab-panel {
+    display: flex;
+    flex-direction: column;
+    gap: var(--chz-gap);
+}
+
+/* ─── Select & Text Input ────────────────────────────────────────────────── */
+
+.chz-select,
+.chz-input {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--chz-input-bg);
+    color: var(--chz-text);
+    border: 1px solid var(--chz-input-border);
+    border-radius: var(--chz-input-radius);
+    padding: var(--chz-input-pad);
+    font-size: 0.85rem;
+    font-family: inherit;
+}
+
+.chz-select:focus,
+.chz-input:focus {
+    outline: none;
+    border-color: var(--chz-btn-primary-bg);
+}
+
 /* ─── Mobile ──────────────────────────────────────────────────────────────── */
 
 @media (max-width: 600px) {

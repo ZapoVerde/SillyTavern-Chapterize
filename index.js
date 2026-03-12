@@ -1,6 +1,6 @@
 /**
  * @file data/default-user/extensions/chapterize/index.js
- * @stamp {"utc":"2026-03-11T00:00:00.000Z"}
+ * @stamp {"utc":"2026-03-12T00:00:00.000Z"}
  * @architectural-role Feature Entry Point
  * @description
  * SillyTavern extension that closes a roleplay chapter. On button click, fires
@@ -10,20 +10,28 @@
  * by the suggestions. On Confirm, writes the combined description + situation
  * block to the character card and creates a new chapter chat seeded with the
  * last N turns. The original chat file is never modified.
+ *
+ * A separate [Update Lorebook] button opens a lorebook modal that fires a
+ * third AI call, presenting lorebook suggestions in a freeform tab (editable
+ * raw text) and an ingester tab (structured apply UI). Lorebook writes are
+ * per-entry and immediate; they do not gate the Confirm flow.
  * @core-principles
  * 1. OWNS the full chapterize workflow from button click through new chat open.
- * 2. MUST NOT commit any server write until the user clicks Confirm.
+ * 2. MUST NOT commit any server write until the user clicks Confirm (except
+ *    lorebook Apply, which is an explicit per-entry user action).
  * 3. DELEGATES all disk persistence to ST server endpoints via fetch; IS NOT
  *    responsible for direct filesystem access.
  * @api-declaration
  * Side-effect module — no exported symbols.
  * Registers on load: Chapterize button in #extensionsMenu,
- *   settings panel in #extensions_settings, hidden modal in <body>.
+ *   settings panel in #extensions_settings, hidden modals in <body>.
  * Entry point: onChapterizeClick() (bound to button).
  * @contract
  *   assertions:
  *     purity: mutates # Modifies module-level session state on each invocation.
- *     state_ownership: [_transcript, _originalDescription, _suggestionsLoading, _situationLoading, extension_settings.chapterize] # Owns all session and settings state.
+ *     state_ownership: [_transcript, _originalDescription, _suggestionsLoading,
+ *       _situationLoading, _lorebookName, _lorebookData, _lorebookLoading,
+ *       extension_settings.chapterize]
  *     external_io: https_apis # generateRaw (LLM) and ST /api/* endpoints.
  */
 
@@ -47,7 +55,7 @@ TASK:
 
 CONSTRAINTS:
 - DO NOT invent new categories (e.g., "Update Status").
-- DO NOT rewrite paragraphs that are still factually accurate. 
+- DO NOT rewrite paragraphs that are still factually accurate.
 - People change slowly; keep edits minimal and integrated into the current prose style.
 - If no changes are needed, return the description as-is.
 
@@ -80,7 +88,7 @@ Analyze the provided TRANSCRIPT to update the narrative state. Write a concise, 
 3. CHARACTER DYNAMICS: Focus on internal shifts. Note new realizations, changes in trust, or veiled intentions that were exposed.
 4. FORMAT: Write in the present tense. Use a single fluid narrative or organized paragraphs. Avoid bullet points to keep the summary immersive for the next generation.
 
-Constraints: No preamble. No "This is a summary." No editorializing. 
+Constraints: No preamble. No "This is a summary." No editorializing.
 TRANSCRIPT:
 {{transcript}}
 `;
@@ -89,14 +97,57 @@ const DEFAULT_SITUATION_PROMPT_AFT = `
 REMINDER: You are an objective chronicler. Summarize the narrative state; do not continue the roleplay or narrate future events. Focus on the 'Unresolved Threads' and 'Character Realizations'. Output only the summary text in present tense (200-500 words).
 `;
 
+const DEFAULT_LOREBOOK_PROMPT = `
+[SYSTEM: TASK — LOREBOOK CURATOR]
+You are reviewing a session transcript and the current lorebook entries for a character.
+Your job is to suggest targeted updates to existing entries and identify new concepts
+that warrant a lorebook entry.
+
+CURRENT LOREBOOK ENTRIES:
+{{lorebook_entries}}
+
+SESSION TRANSCRIPT:
+{{transcript}}
+
+INSTRUCTIONS:
+- For each existing entry whose information is now stale, incomplete, or contradicted by
+  the transcript, output an UPDATE block.
+- For each new person, place, faction, item, or recurring concept introduced in the
+  transcript that does NOT already have an entry, output a NEW block.
+- Keep entries concise (2–6 sentences). Write in third-person present tense.
+- Keys: the most natural words a reader would search for (lowercase, 2–5 keys per entry).
+- If no changes are needed, output exactly: NO CHANGES NEEDED
+
+### OUTPUT FORMAT — use exactly this structure for each suggestion:
+
+**UPDATE: [Exact Entry Name to Match]**
+Keys: keyword1, keyword2, keyword3
+[Full replacement content for this entry — write the complete entry, not just the changed part.]
+*Reason: One sentence explaining what changed and why.*
+
+**NEW: [Suggested Entry Name]**
+Keys: keyword1, keyword2
+[Full content for this new entry.]
+*Reason: One sentence explaining why this warrants a new entry.*
+`;
+
+const DEFAULT_LOREBOOK_PROMPT_AFT = `
+REMINDER: Output only UPDATE and NEW blocks in the exact format shown above.
+No preamble. No commentary. No numbering. Each block must begin with **UPDATE:** or **NEW:**
+on its own line. The Keys line must immediately follow the header line. Content follows the
+Keys line. The *Reason:* line closes each block. Leave one blank line between blocks.
+`;
+
 const SETTINGS_DEFAULTS = Object.freeze({
-    turnsN:             DEFAULT_TURNS_N,
-    storeChangelog:     true,
-    cardPrompt:         DEFAULT_CARD_PROMPT,
-    cardPromptAft:      DEFAULT_CARD_PROMPT_AFT,
-    situationPrompt:    DEFAULT_SITUATION_PROMPT,
-    situationPromptAft: DEFAULT_SITUATION_PROMPT_AFT,
-    changelog:          [],
+    turnsN:              DEFAULT_TURNS_N,
+    storeChangelog:      true,
+    cardPrompt:          DEFAULT_CARD_PROMPT,
+    cardPromptAft:       DEFAULT_CARD_PROMPT_AFT,
+    situationPrompt:     DEFAULT_SITUATION_PROMPT,
+    situationPromptAft:  DEFAULT_SITUATION_PROMPT_AFT,
+    lorebookPrompt:      DEFAULT_LOREBOOK_PROMPT,
+    lorebookPromptAft:   DEFAULT_LOREBOOK_PROMPT_AFT,
+    changelog:           [],
 });
 
 // ─── Session State ────────────────────────────────────────────────────────────
@@ -104,12 +155,21 @@ const SETTINGS_DEFAULTS = Object.freeze({
 
 let _transcript          = '';
 let _originalDescription = '';
+let _priorSituation      = '';
 let _suggestionsLoading  = false;
 let _situationLoading    = false;
 let _isChapterMode       = false;   // true when current char already has a (ChX) suffix
 let _nextChNum           = 1;       // chapter number to assign on next chapterize
 let _cloneName           = '';      // display name for the chapter card (e.g. "CharName (Ch2)")
 let _generationId        = 0;       // incremented on each new invocation; guards stale promise callbacks
+
+// ─── Lorebook Session State ───────────────────────────────────────────────────
+// Not cleared on closeModal — lorebook changes are already persisted per-entry.
+// Reset when the lorebook modal is closed or a new chapterize session begins.
+
+let _lorebookName    = '';    // base character name used as lorebook filename
+let _lorebookData    = null;  // {entries:{}} — loaded from server, mutated on Apply
+let _lorebookLoading = false;
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
@@ -161,9 +221,35 @@ async function runSituationCall() {
         transcript:           _transcript,
         original_description: _originalDescription,
     });
-    const aft    = getSettings().situationPromptAft?.trim();
+    const aft        = getSettings().situationPromptAft?.trim();
+    const priorBlock = _priorSituation
+        ? `PRIOR CHAPTER SUMMARY (events before this session):\n${_priorSituation}\n\n`
+        : '';
+    const prompt = aft ? `${priorBlock}${fore}\n\n${aft}` : `${priorBlock}${fore}`;
+    return generateRaw({ prompt, trimNames: false });
+}
+
+async function runLorebookCall() {
+    const fore = interpolate(getSettings().lorebookPrompt, {
+        lorebook_entries: formatLorebookEntries(_lorebookData),
+        transcript:       _transcript,
+    });
+    const aft    = getSettings().lorebookPromptAft?.trim();
     const prompt = aft ? `${fore}\n\n${aft}` : fore;
     return generateRaw({ prompt, trimNames: false });
+}
+
+// ─── Lorebook Entries Format ──────────────────────────────────────────────────
+
+function formatLorebookEntries(data) {
+    const entries = data?.entries ?? {};
+    const items   = Object.values(entries);
+    if (!items.length) return '(no entries yet)';
+    return items.map(e => {
+        const label = e.comment || String(e.uid);
+        const keys  = Array.isArray(e.key) ? e.key.join(', ') : (e.key || '');
+        return `--- Entry: ${label} ---\nKeys: ${keys}\n${e.content || ''}`;
+    }).join('\n\n');
 }
 
 // ─── Chapter-Character Detection ──────────────────────────────────────────────
@@ -354,6 +440,120 @@ async function saveNewChat(char, chapterName, chatMetadata, lastN) {
     }
 }
 
+// ─── Lorebook API ─────────────────────────────────────────────────────────────
+
+async function lbListLorebooks() {
+    const res = await fetch('/api/worldinfo/list', {
+        method:  'POST',
+        headers: getRequestHeaders(),
+        body:    JSON.stringify({}),
+    });
+    if (!res.ok) throw new Error(`Lorebook list failed (HTTP ${res.status})`);
+    return res.json(); // [{file_id, name, extensions}]
+}
+
+async function lbGetLorebook(name) {
+    const res = await fetch('/api/worldinfo/get', {
+        method:  'POST',
+        headers: getRequestHeaders(),
+        body:    JSON.stringify({ name }),
+    });
+    if (!res.ok) throw new Error(`Lorebook fetch failed (HTTP ${res.status})`);
+    return res.json(); // {entries: {}}
+}
+
+async function lbSaveLorebook(name, data) {
+    const res = await fetch('/api/worldinfo/edit', {
+        method:  'POST',
+        headers: getRequestHeaders(),
+        body:    JSON.stringify({ name, data }),
+    });
+    if (!res.ok) throw new Error(`Lorebook save failed (HTTP ${res.status})`);
+}
+
+/**
+ * Ensures a lorebook named `name` exists, then returns its data.
+ * If the list call fails, treats it as empty and attempts creation anyway.
+ */
+async function lbEnsureLorebook(name) {
+    let list;
+    try {
+        list = await lbListLorebooks();
+    } catch (_) {
+        list = []; // treat list failure as empty — proceed to create
+    }
+    const exists = list.some(item => item.name === name);
+    if (!exists) {
+        await lbSaveLorebook(name, { entries: {} });
+    }
+    return lbGetLorebook(name);
+}
+
+// ─── Lorebook Parser ──────────────────────────────────────────────────────────
+
+/**
+ * Parses the raw text (always sourced from the freeform textarea) into an
+ * array of suggestion objects. Splits on **UPDATE:** / **NEW:** block headers.
+ * Returns [] if the text contains only "NO CHANGES NEEDED" or no valid blocks.
+ */
+function parseLbSuggestions(rawText) {
+    const suggestions = [];
+    // Split on UPDATE/NEW headers, preserving the delimiter via lookahead
+    const parts = rawText.split(/(?=\*\*(UPDATE|NEW):\s)/i);
+    for (const part of parts) {
+        const headerMatch = part.match(/^\*\*(UPDATE|NEW):\s*(.+?)(?:\s*\*{0,2})?\s*[\r\n]/i);
+        if (!headerMatch) continue;
+        const type = headerMatch[1].toUpperCase();
+        const name = headerMatch[2].trim().replace(/\*+$/, '').trim();
+        if (!name) continue;
+
+        const rest = part.slice(headerMatch[0].length);
+
+        // Keys line (first line starting with "Keys:")
+        const keysMatch = rest.match(/^Keys:\s*(.+)$/im);
+        const keys = keysMatch
+            ? keysMatch[1].split(',').map(k => k.trim()).filter(Boolean)
+            : [];
+
+        // Content: everything between the Keys line and *Reason:, or end of block
+        const afterKeys = keysMatch
+            ? rest.slice(rest.indexOf(keysMatch[0]) + keysMatch[0].length)
+            : rest;
+        const reasonIdx = afterKeys.search(/^\*Reason:/im);
+        const content = (reasonIdx !== -1
+            ? afterKeys.slice(0, reasonIdx)
+            : afterKeys
+        ).trim();
+
+        const reasonMatch = afterKeys.match(/^\*Reason:\s*(.+?)\*?\s*$/im);
+        const reason = reasonMatch ? reasonMatch[1].trim() : '';
+
+        if (!content) continue;
+        suggestions.push({ type, name, keys, content, reason });
+    }
+    return suggestions;
+}
+
+/**
+ * Searches _lorebookData.entries for an entry whose comment matches `name`
+ * case-insensitively. Returns the string uid key, or null if not found.
+ */
+function matchEntryByComment(name) {
+    const lower = name.toLowerCase();
+    for (const [uid, entry] of Object.entries(_lorebookData?.entries ?? {})) {
+        if ((entry.comment ?? '').toLowerCase() === lower) return uid;
+    }
+    return null;
+}
+
+/**
+ * Returns the next available numeric uid for a new lorebook entry.
+ */
+function nextLorebookUid() {
+    const keys = Object.keys(_lorebookData?.entries ?? {}).map(Number).filter(n => !isNaN(n));
+    return keys.length ? Math.max(...keys) + 1 : 0;
+}
+
 // ─── Modal HTML ───────────────────────────────────────────────────────────────
 
 const MODAL_HTML = `
@@ -388,9 +588,66 @@ const MODAL_HTML = `
 
       <div id="chz-error-2" class="chz-error-banner chz-hidden"></div>
       <div class="chz-buttons">
-        <button id="chz-confirm"  class="chz-btn chz-btn-primary">Confirm</button>
-        <button id="chz-cancel-2" class="chz-btn chz-btn-secondary">Cancel</button>
+        <button id="chz-confirm"      class="chz-btn chz-btn-primary">Confirm</button>
+        <button id="chz-lorebook-btn" class="chz-btn chz-btn-secondary">Update Lorebook</button>
+        <button id="chz-cancel-2"     class="chz-btn chz-btn-secondary">Cancel</button>
       </div>
+    </div>
+
+  </div>
+</div>`;
+
+const LB_MODAL_HTML = `
+<div id="lbchz-overlay" class="chz-overlay chz-hidden">
+  <div id="lbchz-modal" class="chz-modal" role="dialog" aria-modal="true">
+
+    <div class="chz-section-header">
+      <h3 id="lbchz-title" class="chz-title">Lorebook</h3>
+      <span id="lbchz-spinner" class="chz-section-spin fa-solid fa-spinner fa-spin chz-hidden"></span>
+      <button id="lbchz-regen" class="chz-btn chz-btn-secondary chz-btn-sm">&#x21bb;</button>
+    </div>
+
+    <div class="chz-tab-bar">
+      <button id="lbchz-tab-btn-freeform" class="chz-tab-btn chz-tab-active" data-tab="freeform">Freeform</button>
+      <button id="lbchz-tab-btn-ingester" class="chz-tab-btn"                data-tab="ingester">Ingester</button>
+    </div>
+
+    <div id="lbchz-tab-freeform" class="chz-tab-panel">
+      <textarea id="lbchz-freeform" class="chz-textarea chz-textarea-tall" spellcheck="false"
+                placeholder="AI suggestions appear here. Edit freely before switching to Ingester."></textarea>
+    </div>
+
+    <div id="lbchz-tab-ingester" class="chz-tab-panel chz-hidden">
+      <div class="chz-settings-row">
+        <label for="lbchz-suggestion-select">Suggestion</label>
+        <select id="lbchz-suggestion-select" class="chz-select"></select>
+      </div>
+
+      <div id="lbchz-update-section" class="chz-hidden">
+        <span class="chz-label">Current entry content (read-only)</span>
+        <textarea id="lbchz-current-content" class="chz-textarea" readonly spellcheck="false"></textarea>
+      </div>
+
+      <div class="chz-settings-row">
+        <label for="lbchz-suggested-keys">Keys (comma-separated)</label>
+        <input id="lbchz-suggested-keys" class="chz-input" type="text">
+      </div>
+
+      <span class="chz-label">Suggested content</span>
+      <textarea id="lbchz-suggested-content" class="chz-textarea" spellcheck="false"></textarea>
+
+      <div id="lbchz-error-ingester" class="chz-error-banner chz-hidden"></div>
+
+      <div class="chz-buttons">
+        <button id="lbchz-apply-one" class="chz-btn chz-btn-primary">Apply Entry</button>
+        <button id="lbchz-apply-all" class="chz-btn chz-btn-secondary">Apply All</button>
+      </div>
+    </div>
+
+    <div id="lbchz-error" class="chz-error-banner chz-hidden"></div>
+
+    <div class="chz-buttons">
+      <button id="lbchz-close" class="chz-btn chz-btn-secondary">Close</button>
     </div>
 
   </div>
@@ -405,6 +662,7 @@ function injectModal() {
     $('#chz-regen-suggestions').on('click', onRegenSuggestionsClick);
     $('#chz-regen-situation').on('click',   onRegenSituationClick);
     $('#chz-confirm').on('click',           onConfirmClick);
+    $('#chz-lorebook-btn').on('click',      onUpdateLorebookClick);
     $('#chz-cancel-2').on('click',          closeModal);
 }
 
@@ -417,11 +675,15 @@ function closeModal() {
     _generationId++;
     _transcript          = '';
     _originalDescription = '';
+    _priorSituation      = '';
     _suggestionsLoading  = false;
     _situationLoading    = false;
     _isChapterMode       = false;
     _nextChNum           = 1;
     _cloneName           = '';
+    _lorebookName        = '';
+    _lorebookData        = null;
+    _lorebookLoading     = false;
 }
 
 function showStep2() {
@@ -479,6 +741,239 @@ function showSituationError(message) {
     $('#chz-error-2').text(message).removeClass('chz-hidden');
 }
 
+// ─── Lorebook Modal UI ────────────────────────────────────────────────────────
+
+function injectLbModal() {
+    if ($('#lbchz-overlay').length) return;
+    $('body').append(LB_MODAL_HTML);
+
+    $('#lbchz-regen').on('click',               onLbRegenClick);
+    $('#lbchz-close').on('click',               closeLbModal);
+    $('#lbchz-suggestion-select').on('change',  onLbSuggestionSelectChange);
+    $('#lbchz-apply-one').on('click',           onLbApplyEntry);
+    $('#lbchz-apply-all').on('click',           onLbApplyAll);
+    // Tab switching — delegated to each button via its data-tab attribute
+    $('#lbchz-modal').on('click', '.chz-tab-btn', function () {
+        onLbTabSwitch($(this).data('tab'));
+    });
+}
+
+function showLbModal() {
+    $('#lbchz-overlay').removeClass('chz-hidden');
+    onLbTabSwitch('freeform');
+    $('#lbchz-freeform').val('');
+    $('#lbchz-error').addClass('chz-hidden').text('');
+}
+
+function closeLbModal() {
+    $('#lbchz-overlay').addClass('chz-hidden');
+    _lorebookLoading = false;
+}
+
+function setLbLoading(isLoading) {
+    _lorebookLoading = isLoading;
+    $('#lbchz-spinner').toggleClass('chz-hidden', !isLoading);
+    $('#lbchz-regen').prop('disabled', isLoading);
+    $('#lbchz-freeform').prop('disabled', isLoading);
+    if (isLoading) $('#lbchz-freeform').val('');
+}
+
+function populateLbFreeform(text) {
+    setLbLoading(false);
+    $('#lbchz-freeform').val(text);
+}
+
+function showLbError(message) {
+    setLbLoading(false);
+    $('#lbchz-error').text(message).removeClass('chz-hidden');
+}
+
+function onLbTabSwitch(tabName) {
+    $('#lbchz-modal .chz-tab-btn').each(function () {
+        $(this).toggleClass('chz-tab-active', $(this).data('tab') === tabName);
+    });
+    $('#lbchz-tab-freeform').toggleClass('chz-hidden', tabName !== 'freeform');
+    $('#lbchz-tab-ingester').toggleClass('chz-hidden', tabName !== 'ingester');
+
+    // Re-parse freeform whenever ingester tab is opened so edits are reflected
+    if (tabName === 'ingester') {
+        const suggestions = parseLbSuggestions($('#lbchz-freeform').val());
+        populateLbIngesterDropdown(suggestions);
+        if (suggestions.length) renderLbIngesterDetail(suggestions[0]);
+    }
+}
+
+function populateLbIngesterDropdown(suggestions) {
+    const $sel = $('#lbchz-suggestion-select').empty();
+    if (!suggestions.length) {
+        $sel.append('<option disabled selected>(no suggestions parsed — check Freeform tab)</option>');
+        $('#lbchz-apply-one, #lbchz-apply-all').prop('disabled', true);
+        $('#lbchz-suggested-keys').val('');
+        $('#lbchz-suggested-content').val('');
+        $('#lbchz-update-section').addClass('chz-hidden');
+        return;
+    }
+    suggestions.forEach((s, i) => {
+        $sel.append(`<option value="${i}">${s.type}: ${escapeHtml(s.name)}</option>`);
+    });
+    $('#lbchz-apply-one, #lbchz-apply-all').prop('disabled', false);
+}
+
+function renderLbIngesterDetail(suggestion) {
+    if (!suggestion) return;
+    $('#lbchz-suggested-keys').val(suggestion.keys.join(', '));
+    $('#lbchz-suggested-content').val(suggestion.content);
+    $('#lbchz-error-ingester').addClass('chz-hidden').text('');
+
+    if (suggestion.type === 'UPDATE') {
+        const uid = matchEntryByComment(suggestion.name);
+        const currentContent = uid !== null
+            ? (_lorebookData.entries[uid].content || '')
+            : '(no existing entry matched — will create new)';
+        $('#lbchz-current-content').val(currentContent);
+        $('#lbchz-update-section').removeClass('chz-hidden');
+    } else {
+        $('#lbchz-update-section').addClass('chz-hidden');
+    }
+}
+
+function onLbSuggestionSelectChange() {
+    const suggestions = parseLbSuggestions($('#lbchz-freeform').val());
+    const idx = parseInt($('#lbchz-suggestion-select').val(), 10);
+    if (!isNaN(idx) && suggestions[idx]) {
+        renderLbIngesterDetail(suggestions[idx]);
+    }
+}
+
+// ─── Lorebook Apply ───────────────────────────────────────────────────────────
+
+/**
+ * Applies a single suggestion to _lorebookData and persists it to the server.
+ * For UPDATE: mutates the matched entry (or creates new if no match).
+ * For NEW: always creates a new entry with ST worldinfo defaults.
+ */
+async function lbApplySuggestion({ type, name, keys, content }) {
+    const uid = matchEntryByComment(name);
+    if (uid !== null && type === 'UPDATE') {
+        // Mutate existing entry in-place
+        _lorebookData.entries[uid].content = content;
+        _lorebookData.entries[uid].key     = keys;
+    } else {
+        // Create new entry (also handles unmatched UPDATE)
+        const newUid = nextLorebookUid();
+        _lorebookData.entries[String(newUid)] = {
+            uid:                        newUid,
+            key:                        keys,
+            keysecondary:               [],
+            comment:                    name,
+            content:                    content,
+            constant:                   false,
+            vectorized:                 false,
+            selective:                  true,
+            selectiveLogic:             0,
+            addMemo:                    true,
+            order:                      100,
+            position:                   0,
+            disable:                    false,
+            ignoreBudget:               false,
+            excludeRecursion:           false,
+            preventRecursion:           false,
+            matchPersonaDescription:    false,
+            matchCharacterDescription:  false,
+            matchCharacterPersonality:  false,
+            matchCharacterDepthPrompt:  false,
+            matchScenario:              false,
+            matchCreatorNotes:          false,
+            delayUntilRecursion:        0,
+            probability:                100,
+            useProbability:             true,
+            depth:                      4,
+            outletName:                 '',
+            group:                      '',
+            groupOverride:              false,
+            groupWeight:                100,
+            scanDepth:                  null,
+            caseSensitive:              null,
+            matchWholeWords:            null,
+            useGroupScoring:            null,
+            automationId:               '',
+            role:                       0,
+            sticky:                     null,
+            cooldown:                   null,
+            delay:                      null,
+            triggers:                   [],
+            displayIndex:               newUid,
+        };
+    }
+    await lbSaveLorebook(_lorebookName, _lorebookData);
+}
+
+async function onLbApplyEntry() {
+    const suggestions = parseLbSuggestions($('#lbchz-freeform').val());
+    const idx = parseInt($('#lbchz-suggestion-select').val(), 10);
+    if (isNaN(idx) || !suggestions[idx]) return;
+
+    // Use type + name from the parsed suggestion, but keys + content from the
+    // (potentially edited) UI fields so the user's changes are honoured.
+    const suggestion = {
+        type:    suggestions[idx].type,
+        name:    suggestions[idx].name,
+        keys:    $('#lbchz-suggested-keys').val().split(',').map(k => k.trim()).filter(Boolean),
+        content: $('#lbchz-suggested-content').val().trim(),
+    };
+
+    $('#lbchz-apply-one, #lbchz-apply-all').prop('disabled', true);
+    $('#lbchz-error-ingester').addClass('chz-hidden').text('');
+
+    try {
+        await lbApplySuggestion(suggestion);
+        // Mark entry as applied in the dropdown
+        const $opt = $('#lbchz-suggestion-select option:selected');
+        if (!$opt.text().startsWith('✓')) {
+            $opt.text('✓ ' + $opt.text());
+        }
+    } catch (err) {
+        console.error('[Chapterize] Lorebook apply failed:', err);
+        $('#lbchz-error-ingester').text(`Apply failed: ${err.message}`).removeClass('chz-hidden');
+    } finally {
+        $('#lbchz-apply-one, #lbchz-apply-all').prop('disabled', false);
+    }
+}
+
+async function onLbApplyAll() {
+    const suggestions = parseLbSuggestions($('#lbchz-freeform').val());
+    if (!suggestions.length) return;
+
+    $('#lbchz-apply-one, #lbchz-apply-all').prop('disabled', true);
+    $('#lbchz-error-ingester').addClass('chz-hidden').text('');
+
+    let applied = 0;
+    let failed  = 0;
+    // Sequential — avoids uid collision when multiple NEW entries are added
+    for (const s of suggestions) {
+        try {
+            await lbApplySuggestion(s);
+            applied++;
+        } catch (err) {
+            console.error('[Chapterize] Lorebook apply-all item failed:', err);
+            failed++;
+        }
+    }
+
+    $('#lbchz-apply-one, #lbchz-apply-all').prop('disabled', false);
+
+    if (failed === 0) {
+        toastr.success(`Applied ${applied} lorebook suggestion${applied !== 1 ? 's' : ''}.`);
+        $('#lbchz-suggestion-select option').each(function () {
+            if (!$(this).text().startsWith('✓')) $(this).text('✓ ' + $(this).text());
+        });
+    } else {
+        $('#lbchz-error-ingester')
+            .text(`Applied ${applied}, failed ${failed}. Check the console for details.`)
+            .removeClass('chz-hidden');
+    }
+}
+
 // ─── Event Handlers ───────────────────────────────────────────────────────────
 
 async function onChapterizeClick() {
@@ -512,6 +1007,7 @@ async function onChapterizeClick() {
     const raw    = char.description ?? '';
     const sepIdx = raw.indexOf(SITUATION_SEP);
     _originalDescription = sepIdx !== -1 ? raw.slice(0, sepIdx) : raw;
+    _priorSituation      = sepIdx !== -1 ? raw.slice(sepIdx + SITUATION_SEP.length).trim() : '';
     _transcript          = buildTranscript(messages);
 
     showModal();
@@ -563,6 +1059,50 @@ function onRegenSituationClick() {
         });
 }
 
+async function onUpdateLorebookClick() {
+    const context = SillyTavern.getContext();
+    if (context.characterId == null) {
+        toastr.warning('No character selected.');
+        return;
+    }
+    const char = context.characters[context.characterId];
+    _lorebookName = parseChapter(char.name).baseName;
+
+    $('#lbchz-title').text(`Lorebook: ${_lorebookName}`);
+
+    try {
+        _lorebookData = await lbEnsureLorebook(_lorebookName);
+    } catch (err) {
+        toastr.error(`Could not load lorebook: ${err.message}`);
+        return;
+    }
+
+    showLbModal();
+    setLbLoading(true);
+
+    const genId = _generationId;
+    runLorebookCall()
+        .then(text => { if (_generationId !== genId) return; populateLbFreeform(text); })
+        .catch(err => {
+            if (_generationId !== genId) return;
+            console.error('[Chapterize] Lorebook call failed:', err);
+            showLbError(`Generation failed: ${err.message}`);
+        });
+}
+
+function onLbRegenClick() {
+    setLbLoading(true);
+    $('#lbchz-error').addClass('chz-hidden').text('');
+    const genId = _generationId;
+    runLorebookCall()
+        .then(text => { if (_generationId !== genId) return; populateLbFreeform(text); })
+        .catch(err => {
+            if (_generationId !== genId) return;
+            console.error('[Chapterize] Lorebook regen failed:', err);
+            showLbError(`Regeneration failed: ${err.message}`);
+        });
+}
+
 async function onConfirmClick() {
     let cardText        = $('#chz-card-text').val().trim();
     const situationText = $('#chz-situation-text').val().trim();
@@ -576,7 +1116,7 @@ async function onConfirmClick() {
         cardText = cardText.slice(0, separatorIndex);
     }
 
-    $('#chz-confirm, #chz-cancel-2').prop('disabled', true);
+    $('#chz-confirm, #chz-cancel-2, #chz-lorebook-btn').prop('disabled', true);
 
     const context        = SillyTavern.getContext();
     const char           = context.characters[context.characterId];
@@ -613,7 +1153,7 @@ async function onConfirmClick() {
         } catch (err) {
             const suffix = isCharacterSaved ? ' (Character card was already saved.)' : '';
             $('#chz-error-2').text(`${err.message}${suffix}`).removeClass('chz-hidden');
-            $('#chz-confirm, #chz-cancel-2').prop('disabled', false);
+            $('#chz-confirm, #chz-cancel-2, #chz-lorebook-btn').prop('disabled', false);
             return;
         }
 
@@ -623,7 +1163,7 @@ async function onConfirmClick() {
             await saveNewChat(freshChar, chapterName, context.chatMetadata, lastN);
         } catch (err) {
             $('#chz-error-2').text(`${err.message} The character card has already been saved.`).removeClass('chz-hidden');
-            $('#chz-confirm, #chz-cancel-2').prop('disabled', false);
+            $('#chz-confirm, #chz-cancel-2, #chz-lorebook-btn').prop('disabled', false);
             return;
         }
 
@@ -648,7 +1188,7 @@ async function onConfirmClick() {
             cloneAvatarUrl = await createCharacterClone(char, cloneName, newDescription);
         } catch (err) {
             $('#chz-error-2').text(err.message).removeClass('chz-hidden');
-            $('#chz-confirm, #chz-cancel-2').prop('disabled', false);
+            $('#chz-confirm, #chz-cancel-2, #chz-lorebook-btn').prop('disabled', false);
             return;
         }
 
@@ -660,7 +1200,7 @@ async function onConfirmClick() {
             $('#chz-error-2')
                 .text(`Created ${cloneName} but could not locate it in the character list. Please select it manually.`)
                 .removeClass('chz-hidden');
-            $('#chz-confirm, #chz-cancel-2').prop('disabled', false);
+            $('#chz-confirm, #chz-cancel-2, #chz-lorebook-btn').prop('disabled', false);
             return;
         }
 
@@ -675,7 +1215,7 @@ async function onConfirmClick() {
             $('#chz-error-2')
                 .text(`${err.message} Character ${cloneName} was created but the chat could not be saved.`)
                 .removeClass('chz-hidden');
-            $('#chz-confirm, #chz-cancel-2').prop('disabled', false);
+            $('#chz-confirm, #chz-cancel-2, #chz-lorebook-btn').prop('disabled', false);
             return;
         }
 
@@ -764,6 +1304,24 @@ function buildSettingsHtml() {
         <textarea id="chz-set-prompt-situation-aft" class="chz-settings-textarea">${escapeHtml(s.situationPromptAft)}</textarea>
       </div>
 
+      <div class="chz-settings-row">
+        <div class="chz-settings-label-row">
+          <label for="chz-set-prompt-lorebook">Lorebook prompt (before content)</label>
+          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
+                  data-target="chz-set-prompt-lorebook" data-key="lorebookPrompt">Reset</button>
+        </div>
+        <textarea id="chz-set-prompt-lorebook" class="chz-settings-textarea">${escapeHtml(s.lorebookPrompt)}</textarea>
+      </div>
+
+      <div class="chz-settings-row">
+        <div class="chz-settings-label-row">
+          <label for="chz-set-prompt-lorebook-aft">Lorebook prompt (after content)</label>
+          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
+                  data-target="chz-set-prompt-lorebook-aft" data-key="lorebookPromptAft">Reset</button>
+        </div>
+        <textarea id="chz-set-prompt-lorebook-aft" class="chz-settings-textarea">${escapeHtml(s.lorebookPromptAft)}</textarea>
+      </div>
+
     </div>
   </div>
 </div>`;
@@ -803,6 +1361,16 @@ function bindSettingsHandlers() {
         saveSettingsDebounced();
     });
 
+    $('#chz-set-prompt-lorebook').on('input', () => {
+        getSettings().lorebookPrompt = $('#chz-set-prompt-lorebook').val();
+        saveSettingsDebounced();
+    });
+
+    $('#chz-set-prompt-lorebook-aft').on('input', () => {
+        getSettings().lorebookPromptAft = $('#chz-set-prompt-lorebook-aft').val();
+        saveSettingsDebounced();
+    });
+
     $('.chz-reset-btn').on('click', function () {
         const targetId   = $(this).data('target');
         const key        = $(this).data('key');
@@ -838,6 +1406,7 @@ function injectButton() {
 async function init() {
     initSettings();
     injectModal();
+    injectLbModal();
     injectSettingsPanel();
     injectButton();
 }
