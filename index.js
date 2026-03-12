@@ -37,6 +37,8 @@
 
 import { generateRaw, saveSettingsDebounced, getRequestHeaders, openCharacterChat, getCharacters, selectCharacterById, eventSource, event_types } from '../../../../script.js';
 import { extension_settings } from '../../../extensions.js';
+import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
+import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -563,36 +565,36 @@ const MODAL_HTML = `
   <div id="chz-modal" class="chz-modal" role="dialog" aria-modal="true">
 
     <div id="chz-step-2" class="chz-step chz-hidden">
-      <h3 class="chz-title">Finalize Character &amp; Situation</h3>
+      <h3 class="chz-title" data-i18n="chapterize.finalize_title">Finalize Character &amp; Situation</h3>
 
       <div class="chz-section-header">
-        <span class="chz-label">AI Suggested Tweaks</span>
+        <span class="chz-label" data-i18n="chapterize.ai_suggested_tweaks">AI Suggested Tweaks</span>
         <span id="chz-spin-suggestions" class="chz-section-spin fa-solid fa-spinner fa-spin chz-hidden"></span>
         <button id="chz-regen-suggestions" class="chz-btn chz-btn-secondary chz-btn-sm">&#x21bb;</button>
       </div>
       <div id="chz-suggestions" class="chz-suggestions-box"></div>
 
-      <span class="chz-label">Edit Character Description</span>
+      <span class="chz-label" data-i18n="chapterize.edit_char_desc">Edit Character Description</span>
       <textarea id="chz-card-text" class="chz-textarea chz-textarea-tall" spellcheck="false"></textarea>
 
       <div class="chz-section-header">
-        <span class="chz-label">Situation Summary</span>
+        <span class="chz-label" data-i18n="chapterize.situation_summary">Situation Summary</span>
         <span id="chz-spin-situation" class="chz-section-spin fa-solid fa-spinner fa-spin chz-hidden"></span>
         <button id="chz-regen-situation" class="chz-btn chz-btn-secondary chz-btn-sm">&#x21bb;</button>
       </div>
       <textarea id="chz-situation-text" class="chz-textarea" spellcheck="false"></textarea>
 
       <div class="chz-turns-row">
-        <span class="chz-label">Turns to carry into new chapter</span>
+        <span class="chz-label" data-i18n="chapterize.turns_label">Turns to carry into new chapter</span>
         <input id="chz-turns" class="chz-turns-input" type="number"
                min="${MIN_TURNS}" max="${MAX_TURNS}" value="${DEFAULT_TURNS_N}">
       </div>
 
       <div id="chz-error-2" class="chz-error-banner chz-hidden"></div>
       <div class="chz-buttons">
-        <button id="chz-confirm"      class="chz-btn chz-btn-primary">Confirm</button>
-        <button id="chz-lorebook-btn" class="chz-btn chz-btn-secondary">Update Lorebook</button>
-        <button id="chz-cancel-2"     class="chz-btn chz-btn-secondary">Cancel</button>
+        <button id="chz-confirm"      class="chz-btn chz-btn-primary"   data-i18n="chapterize.confirm">Confirm</button>
+        <button id="chz-lorebook-btn" class="chz-btn chz-btn-secondary" data-i18n="chapterize.update_lorebook">Update Lorebook</button>
+        <button id="chz-cancel-2"     class="chz-btn chz-btn-secondary" data-i18n="chapterize.cancel">Cancel</button>
       </div>
     </div>
 
@@ -604,52 +606,53 @@ const LB_MODAL_HTML = `
   <div id="lbchz-modal" class="chz-modal" role="dialog" aria-modal="true">
 
     <div class="chz-section-header">
-      <h3 id="lbchz-title" class="chz-title">Lorebook</h3>
+      <h3 id="lbchz-title" class="chz-title" data-i18n="chapterize.lorebook_title">Lorebook</h3>
       <span id="lbchz-spinner" class="chz-section-spin fa-solid fa-spinner fa-spin chz-hidden"></span>
       <button id="lbchz-regen" class="chz-btn chz-btn-secondary chz-btn-sm">&#x21bb;</button>
     </div>
 
     <div class="chz-tab-bar">
-      <button id="lbchz-tab-btn-freeform" class="chz-tab-btn chz-tab-active" data-tab="freeform">Freeform</button>
-      <button id="lbchz-tab-btn-ingester" class="chz-tab-btn"                data-tab="ingester">Ingester</button>
+      <button id="lbchz-tab-btn-freeform" class="chz-tab-btn chz-tab-active" data-tab="freeform" data-i18n="chapterize.tab_freeform">Freeform</button>
+      <button id="lbchz-tab-btn-ingester" class="chz-tab-btn"                data-tab="ingester" data-i18n="chapterize.tab_ingester">Ingester</button>
     </div>
 
     <div id="lbchz-tab-freeform" class="chz-tab-panel">
       <textarea id="lbchz-freeform" class="chz-textarea chz-textarea-tall" spellcheck="false"
+                data-i18n="[placeholder]chapterize.lb_freeform_placeholder"
                 placeholder="AI suggestions appear here. Edit freely before switching to Ingester."></textarea>
     </div>
 
     <div id="lbchz-tab-ingester" class="chz-tab-panel chz-hidden">
       <div class="chz-settings-row">
-        <label for="lbchz-suggestion-select">Suggestion</label>
+        <label for="lbchz-suggestion-select" data-i18n="chapterize.suggestion_label">Suggestion</label>
         <select id="lbchz-suggestion-select" class="chz-select"></select>
       </div>
 
       <div id="lbchz-update-section" class="chz-hidden">
-        <span class="chz-label">Current entry content (read-only)</span>
+        <span class="chz-label" data-i18n="chapterize.current_entry_content">Current entry content (read-only)</span>
         <textarea id="lbchz-current-content" class="chz-textarea" readonly spellcheck="false"></textarea>
       </div>
 
       <div class="chz-settings-row">
-        <label for="lbchz-suggested-keys">Keys (comma-separated)</label>
+        <label for="lbchz-suggested-keys" data-i18n="chapterize.keys_label">Keys (comma-separated)</label>
         <input id="lbchz-suggested-keys" class="chz-input" type="text">
       </div>
 
-      <span class="chz-label">Suggested content</span>
+      <span class="chz-label" data-i18n="chapterize.suggested_content">Suggested content</span>
       <textarea id="lbchz-suggested-content" class="chz-textarea" spellcheck="false"></textarea>
 
       <div id="lbchz-error-ingester" class="chz-error-banner chz-hidden"></div>
 
       <div class="chz-buttons">
-        <button id="lbchz-apply-one" class="chz-btn chz-btn-primary">Apply Entry</button>
-        <button id="lbchz-apply-all" class="chz-btn chz-btn-secondary">Apply All</button>
+        <button id="lbchz-apply-one" class="chz-btn chz-btn-primary"   data-i18n="chapterize.apply_entry">Apply Entry</button>
+        <button id="lbchz-apply-all" class="chz-btn chz-btn-secondary" data-i18n="chapterize.apply_all">Apply All</button>
       </div>
     </div>
 
     <div id="lbchz-error" class="chz-error-banner chz-hidden"></div>
 
     <div class="chz-buttons">
-      <button id="lbchz-close" class="chz-btn chz-btn-secondary">Close</button>
+      <button id="lbchz-close" class="chz-btn chz-btn-secondary" data-i18n="chapterize.close">Close</button>
     </div>
 
   </div>
@@ -1251,14 +1254,14 @@ function buildSettingsHtml() {
     return `
 <div class="chz-settings-block inline-drawer">
   <div class="inline-drawer-toggle inline-drawer-header">
-    <b>Chapterize</b>
+    <b data-i18n="chapterize.settings_title">Chapterize</b>
     <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
   </div>
   <div class="inline-drawer-content">
     <div class="chz-settings-group">
 
       <div class="chz-settings-row">
-        <label for="chz-set-turns">Turns to carry over (default)</label>
+        <label for="chz-set-turns" data-i18n="chapterize.settings_turns_label">Turns to carry over (default)</label>
         <input id="chz-set-turns" type="number"
                min="${MIN_TURNS}" max="${MAX_TURNS}" value="${s.turnsN}">
       </div>
@@ -1266,60 +1269,66 @@ function buildSettingsHtml() {
       <div class="chz-settings-row">
         <label>
           <input id="chz-set-changelog" type="checkbox" ${s.storeChangelog ? 'checked' : ''}>
-          Store changelog
+          <span data-i18n="chapterize.settings_store_changelog">Store changelog</span>
         </label>
       </div>
 
       <div class="chz-settings-row">
         <div class="chz-settings-label-row">
-          <label for="chz-set-prompt-card">Card/Suggestions prompt (before content)</label>
+          <label for="chz-set-prompt-card" data-i18n="chapterize.settings_card_prompt">Card/Suggestions prompt (before content)</label>
           <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
-                  data-target="chz-set-prompt-card" data-key="cardPrompt">Reset</button>
+                  data-target="chz-set-prompt-card" data-key="cardPrompt"
+                  data-i18n="chapterize.reset">Reset</button>
         </div>
         <textarea id="chz-set-prompt-card" class="chz-settings-textarea">${escapeHtml(s.cardPrompt)}</textarea>
       </div>
 
       <div class="chz-settings-row">
         <div class="chz-settings-label-row">
-          <label for="chz-set-prompt-card-aft">Card/Suggestions prompt (after content)</label>
+          <label for="chz-set-prompt-card-aft" data-i18n="chapterize.settings_card_prompt_aft">Card/Suggestions prompt (after content)</label>
           <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
-                  data-target="chz-set-prompt-card-aft" data-key="cardPromptAft">Reset</button>
+                  data-target="chz-set-prompt-card-aft" data-key="cardPromptAft"
+                  data-i18n="chapterize.reset">Reset</button>
         </div>
         <textarea id="chz-set-prompt-card-aft" class="chz-settings-textarea">${escapeHtml(s.cardPromptAft)}</textarea>
       </div>
 
       <div class="chz-settings-row">
         <div class="chz-settings-label-row">
-          <label for="chz-set-prompt-situation">Situation prompt (before content)</label>
+          <label for="chz-set-prompt-situation" data-i18n="chapterize.settings_situation_prompt">Situation prompt (before content)</label>
           <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
-                  data-target="chz-set-prompt-situation" data-key="situationPrompt">Reset</button>
+                  data-target="chz-set-prompt-situation" data-key="situationPrompt"
+                  data-i18n="chapterize.reset">Reset</button>
         </div>
         <textarea id="chz-set-prompt-situation" class="chz-settings-textarea">${escapeHtml(s.situationPrompt)}</textarea>
       </div>
 
       <div class="chz-settings-row">
         <div class="chz-settings-label-row">
-          <label for="chz-set-prompt-situation-aft">Situation prompt (after content)</label>
+          <label for="chz-set-prompt-situation-aft" data-i18n="chapterize.settings_situation_prompt_aft">Situation prompt (after content)</label>
           <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
-                  data-target="chz-set-prompt-situation-aft" data-key="situationPromptAft">Reset</button>
+                  data-target="chz-set-prompt-situation-aft" data-key="situationPromptAft"
+                  data-i18n="chapterize.reset">Reset</button>
         </div>
         <textarea id="chz-set-prompt-situation-aft" class="chz-settings-textarea">${escapeHtml(s.situationPromptAft)}</textarea>
       </div>
 
       <div class="chz-settings-row">
         <div class="chz-settings-label-row">
-          <label for="chz-set-prompt-lorebook">Lorebook prompt (before content)</label>
+          <label for="chz-set-prompt-lorebook" data-i18n="chapterize.settings_lorebook_prompt">Lorebook prompt (before content)</label>
           <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
-                  data-target="chz-set-prompt-lorebook" data-key="lorebookPrompt">Reset</button>
+                  data-target="chz-set-prompt-lorebook" data-key="lorebookPrompt"
+                  data-i18n="chapterize.reset">Reset</button>
         </div>
         <textarea id="chz-set-prompt-lorebook" class="chz-settings-textarea">${escapeHtml(s.lorebookPrompt)}</textarea>
       </div>
 
       <div class="chz-settings-row">
         <div class="chz-settings-label-row">
-          <label for="chz-set-prompt-lorebook-aft">Lorebook prompt (after content)</label>
+          <label for="chz-set-prompt-lorebook-aft" data-i18n="chapterize.settings_lorebook_prompt_aft">Lorebook prompt (after content)</label>
           <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
-                  data-target="chz-set-prompt-lorebook-aft" data-key="lorebookPromptAft">Reset</button>
+                  data-target="chz-set-prompt-lorebook-aft" data-key="lorebookPromptAft"
+                  data-i18n="chapterize.reset">Reset</button>
         </div>
         <textarea id="chz-set-prompt-lorebook-aft" class="chz-settings-textarea">${escapeHtml(s.lorebookPromptAft)}</textarea>
       </div>
@@ -1411,6 +1420,16 @@ async function init() {
     injectLbModal();
     injectSettingsPanel();
     injectButton();
+
+    try {
+        SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+            name: 'chapterize',
+            helpString: 'Close the current chapter and transition to a new one',
+            callback: () => { onChapterizeClick(); return ''; },
+        }));
+    } catch (e) {
+        console.warn('[Chapterize] Could not register slash command:', e);
+    }
 }
 
 await init();

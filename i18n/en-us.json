@@ -1,0 +1,33 @@
+{
+    "chapterize.finalize_title": "Finalize Character & Situation",
+    "chapterize.ai_suggested_tweaks": "AI Suggested Tweaks",
+    "chapterize.edit_char_desc": "Edit Character Description",
+    "chapterize.situation_summary": "Situation Summary",
+    "chapterize.turns_label": "Turns to carry into new chapter",
+    "chapterize.confirm": "Confirm",
+    "chapterize.update_lorebook": "Update Lorebook",
+    "chapterize.cancel": "Cancel",
+
+    "chapterize.lorebook_title": "Lorebook",
+    "chapterize.tab_freeform": "Freeform",
+    "chapterize.tab_ingester": "Ingester",
+    "chapterize.lb_freeform_placeholder": "AI suggestions appear here. Edit freely before switching to Ingester.",
+    "chapterize.suggestion_label": "Suggestion",
+    "chapterize.current_entry_content": "Current entry content (read-only)",
+    "chapterize.keys_label": "Keys (comma-separated)",
+    "chapterize.suggested_content": "Suggested content",
+    "chapterize.apply_entry": "Apply Entry",
+    "chapterize.apply_all": "Apply All",
+    "chapterize.close": "Close",
+
+    "chapterize.settings_title": "Chapterize",
+    "chapterize.settings_turns_label": "Turns to carry over (default)",
+    "chapterize.settings_store_changelog": "Store changelog",
+    "chapterize.settings_card_prompt": "Card/Suggestions prompt (before content)",
+    "chapterize.settings_card_prompt_aft": "Card/Suggestions prompt (after content)",
+    "chapterize.settings_situation_prompt": "Situation prompt (before content)",
+    "chapterize.settings_situation_prompt_aft": "Situation prompt (after content)",
+    "chapterize.settings_lorebook_prompt": "Lorebook prompt (before content)",
+    "chapterize.settings_lorebook_prompt_aft": "Lorebook prompt (after content)",
+    "chapterize.reset": "Reset"
+}
