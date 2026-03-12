@@ -64,6 +64,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    overflow-y: auto;
 }
 
 .chz-modal {
@@ -347,9 +348,18 @@
 
 @media (max-width: 600px) {
     :root {
-        --chz-modal-pad:   12px;
-        --chz-modal-max-h: 95vh;
+        --chz-modal-pad:      12px;
+        --chz-modal-max-h:    none;
         --chz-modal-max-width: 98vw;
+    }
+
+    .chz-overlay {
+        align-items: flex-start;
+        padding: 12px 0;
+    }
+
+    .chz-modal {
+        max-height: none;
     }
 
     .chz-turns-row {
