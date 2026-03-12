@@ -32,13 +32,15 @@
  *     state_ownership: [_transcript, _originalDescription, _suggestionsLoading,
  *       _situationLoading, _lorebookName, _lorebookData, _lorebookLoading,
  *       extension_settings.chapterize]
- *     external_io: https_apis # generateRaw (LLM) and ST /api/* endpoints.
+ *     external_io: https_apis # generateWithProfile (LLM, via generateRaw or
+ *       ConnectionManagerRequestService) and ST /api/* endpoints.
  */
 
 import { generateRaw, saveSettingsDebounced, getRequestHeaders, openCharacterChat, getCharacters, selectCharacterById, eventSource, event_types } from '../../../../script.js';
 import { extension_settings } from '../../../extensions.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
 import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
+import { ConnectionManagerRequestService } from '../../shared.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -143,6 +145,7 @@ Keys line. The *Reason:* line closes each block. Leave one blank line between bl
 const SETTINGS_DEFAULTS = Object.freeze({
     turnsN:              DEFAULT_TURNS_N,
     storeChangelog:      true,
+    profileId:           null,
     cardPrompt:          DEFAULT_CARD_PROMPT,
     cardPromptAft:       DEFAULT_CARD_PROMPT_AFT,
     situationPrompt:     DEFAULT_SITUATION_PROMPT,
@@ -208,6 +211,15 @@ function interpolate(template, vars) {
 
 // ─── LLM Calls ───────────────────────────────────────────────────────────────
 
+async function generateWithProfile(prompt) {
+    const profileId = getSettings().profileId;
+    if (profileId) {
+        const result = await ConnectionManagerRequestService.sendRequest(profileId, prompt, null);
+        return result.content;
+    }
+    return generateRaw({ prompt, trimNames: false });
+}
+
 async function runSuggestionsCall() {
     const fore = interpolate(getSettings().cardPrompt, {
         original_description: _originalDescription,
@@ -215,7 +227,7 @@ async function runSuggestionsCall() {
     });
     const aft    = getSettings().cardPromptAft?.trim();
     const prompt = aft ? `${fore}\n\n${aft}` : fore;
-    return generateRaw({ prompt, trimNames: false });
+    return generateWithProfile(prompt);
 }
 
 async function runSituationCall() {
@@ -228,7 +240,7 @@ async function runSituationCall() {
         ? `PRIOR CHAPTER SUMMARY (events before this session):\n${_priorSituation}\n\n`
         : '';
     const prompt = aft ? `${priorBlock}${fore}\n\n${aft}` : `${priorBlock}${fore}`;
-    return generateRaw({ prompt, trimNames: false });
+    return generateWithProfile(prompt);
 }
 
 async function runLorebookCall() {
@@ -238,7 +250,7 @@ async function runLorebookCall() {
     });
     const aft    = getSettings().lorebookPromptAft?.trim();
     const prompt = aft ? `${fore}\n\n${aft}` : fore;
-    return generateRaw({ prompt, trimNames: false });
+    return generateWithProfile(prompt);
 }
 
 // ─── Lorebook Entries Format ──────────────────────────────────────────────────
@@ -1274,6 +1286,12 @@ function buildSettingsHtml() {
       </div>
 
       <div class="chz-settings-row">
+        <label for="chz-set-profile" data-i18n="chapterize.settings_profile_label">Connection Profile</label>
+        <select id="chz-set-profile" class="text_pole"></select>
+        <small data-i18n="chapterize.settings_profile_hint" style="opacity:0.7">Override the active connection for Chapterize AI calls. Leave on default to use the global connection.</small>
+      </div>
+
+      <div class="chz-settings-row">
         <div class="chz-settings-label-row">
           <label for="chz-set-prompt-card" data-i18n="chapterize.settings_card_prompt">Card/Suggestions prompt (before content)</label>
           <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
@@ -1351,6 +1369,19 @@ function bindSettingsHandlers() {
         getSettings().storeChangelog = $('#chz-set-changelog').is(':checked');
         saveSettingsDebounced();
     });
+
+    try {
+        ConnectionManagerRequestService.handleDropdown(
+            '#chz-set-profile',
+            getSettings().profileId ?? '',
+            (profile) => {
+                getSettings().profileId = profile?.id ?? null;
+                saveSettingsDebounced();
+            },
+        );
+    } catch (e) {
+        console.warn('[Chapterize] Could not initialize profile dropdown:', e);
+    }
 
     $('#chz-set-prompt-card').on('input', () => {
         getSettings().cardPrompt = $('#chz-set-prompt-card').val();

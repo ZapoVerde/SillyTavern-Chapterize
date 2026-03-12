@@ -23,6 +23,8 @@
     "chapterize.settings_title": "Chapterize",
     "chapterize.settings_turns_label": "Turns to carry over (default)",
     "chapterize.settings_store_changelog": "Store changelog",
+    "chapterize.settings_profile_label": "Connection Profile",
+    "chapterize.settings_profile_hint": "Override the active connection for Chapterize AI calls. Leave on default to use the global connection.",
     "chapterize.settings_card_prompt": "Card/Suggestions prompt (before content)",
     "chapterize.settings_card_prompt_aft": "Card/Suggestions prompt (after content)",
     "chapterize.settings_situation_prompt": "Situation prompt (before content)",

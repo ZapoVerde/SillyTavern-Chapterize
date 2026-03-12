@@ -38,7 +38,7 @@ The quality of your chapter transitions depends heavily on the model used. Becau
 
 - **Recommended:** **Gemini 1.5 Flash/Pro**, **GPT-4o**, or **Claude 3.5 Sonnet**. These models excel at long-context comprehension and provide clean, professional prose updates.
 - **Use with Caution:** Smaller or older models (like **DeepSeek-V3** or **Llama-3-8B**) may struggle with the instructions, occasionally adding meta-commentary or failing to identify subtle character changes.
-- **Pro Tip:** If you usually roleplay with a cheaper/smaller model, consider temporarily switching to a more powerful model just for the Chapterize step to ensure your character card evolves accurately.
+- **Pro Tip:** Use the **Connection Profile** setting (see Configuration below) to pin Chapterize to a powerful model while keeping your main roleplay chat on a faster or cheaper one — no manual switching required.
 
 ## Installation
 
@@ -75,6 +75,7 @@ In the SillyTavern Extensions settings panel (gear icon) you can:
 
 - **Default Turns** — how many turns to carry over into new chapters (1–10, default 4).
 - **Store Changelog** — keeps a timestamped history of chapter transitions in `extension_settings`.
+- **Connection Profile** — pin Chapterize's three AI calls (Card Audit, Situation Summary, Lorebook) to a specific Connection Manager profile. When set, this profile is used regardless of the globally active connection. Leave on the default option to use whatever connection is currently active (the pre-existing behaviour). Only Chat Completion and Text Completion profiles are listed; other API types continue to work via the global connection fallback.
 - **Prompt Templates** — fully rewrite the instructions for Card/Suggestions, Situation, and Lorebook calls. Each prompt has a *before content* and *after content* section; both can be reset to their defaults individually.
 
 ## Technical Notes

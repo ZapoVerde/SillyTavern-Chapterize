@@ -12,7 +12,7 @@ chapterize/
 └── Architecture.md
 ```
 
-Single-file JS. No build step, no modules, no dependencies beyond what ST provides.
+Single-file JS. No build step. Imports from ST core (`script.js`, `extensions.js`, `slash-commands/`) and the shared ST extension utility (`scripts/extensions/shared.js`) for `ConnectionManagerRequestService`.
 
 ---
 
@@ -29,6 +29,7 @@ Single-file JS. No build step, no modules, no dependencies beyond what ST provid
 │  │ .characters │     │  Extensions  │    │  /api/       │  │
 │  │ .characterId│     │  panel       │    │  /chats/     │  │
 │  │ generateRaw │     │              │    │  /characters/│  │
+│  │ ConnMgrSvc  │     │              │    │              │  │
 │  └──────┬──────┘     └──────┬───────┘    └──────┬───────┘  │
 │         │                   │                   │          │
 └─────────┼───────────────────┼───────────────────┼──────────┘
@@ -37,7 +38,7 @@ Single-file JS. No build step, no modules, no dependencies beyond what ST provid
           │         │           CHAPTERIZE EXTENSION          │
           │         │                                         │
           │         │  ┌─────────────────────────────────┐   │
-          └─────────►  │         index.js                │   │
+          └─────────►  │  index.js + shared.js (ConnMgr) │   │
                     │  │                                  │   │
                     │  │  ┌──────────┐                   │   │
                     │  │  │  init()  │ — runs on load     │   │
@@ -168,11 +169,12 @@ ST Context
   ┌─────────────────────────────────────────────────────┐
   │  REVIEW STEP (single step)                          │
   │                                                     │
-  │  generateRaw(cardPrompt + description + transcript) │
+  │  generateWithProfile(cardPrompt + description +     │
+  │                       transcript)                   │
   │    → suggestions box (read-only, regenerable)       │
   │                                                     │
-  │  generateRaw(situationPrompt + transcript           │
-  │              + priorSituation)                      │
+  │  generateWithProfile(situationPrompt + transcript   │
+  │                       + priorSituation)             │
   │    → situation textarea (editable, regenerable)     │
   │                                                     │
   │  description textarea (editable)                    │
@@ -227,7 +229,7 @@ ST Context
   │
   ├── showLbModal()
   │
-  └── generateRaw(lorebookPrompt + entries + transcript)
+  └── generateWithProfile(lorebookPrompt + entries + transcript)
         → lbchz-freeform textarea
 
 Freeform tab:
@@ -312,7 +314,8 @@ Cleared at the start of each `onChapterizeClick()` invocation (and on `closeModa
 |---|---|---|
 | Read chat | `SillyTavern.getContext().chat` | Real message objects only — no metadata header |
 | Read character | `SillyTavern.getContext().characters[characterId]` | Full object |
-| Generate text | `await generateRaw({ prompt, trimNames: false })` | Uses current API/model |
+| Generate text | `await generateWithProfile(prompt)` | Routes to `ConnectionManagerRequestService.sendRequest()` when a profile is configured (returns `result.content`); falls back to `generateRaw({ prompt, trimNames: false })` otherwise |
+| Connection profiles | `ConnectionManagerRequestService` from `scripts/extensions/shared.js` | Used to send requests against a specific profile without mutating global API state; only Chat Completion and Text Completion profiles are supported |
 | Create character | `POST /api/characters/create` multipart | Returns plain-text avatar filename |
 | Save character | `POST /api/characters/edit` multipart | Fully destructive — must round-trip all fields via `buildCharacterFormData()` |
 | Refresh char list | `await getCharacters()` | Required after create/edit before `selectCharacterById` |
@@ -349,6 +352,26 @@ header.chat_metadata.lastInContextMessageId = 0;
 header.chat_metadata.integrity = crypto.randomUUID();
 header.chat_metadata.tainted   = false;
 ```
+
+---
+
+## LLM Routing
+
+All three LLM calls (`runSuggestionsCall`, `runSituationCall`, `runLorebookCall`) go through the central `generateWithProfile(prompt)` helper:
+
+```
+generateWithProfile(prompt)
+  │
+  ├── settings.profileId set?
+  │     YES → ConnectionManagerRequestService.sendRequest(profileId, prompt, null)
+  │               returns ExtractedData { content, reasoning }
+  │               → return result.content
+  │
+  └── NO  → generateRaw({ prompt, trimNames: false })
+                uses globally active connection (pre-existing behaviour)
+```
+
+The profile dropdown in Settings lists only `openai` (Chat Completion) and `textgenerationwebui` (Text Completion) profile types — the set supported by `ConnectionManagerRequestService`. Profiles using other API backends (kobold, novel.ai, etc.) remain usable via the global connection fallback.
 
 ---
 
