@@ -1189,24 +1189,23 @@ function populateIngesterDropdown() {
 
 /**
  * Word-level LCS diff between two strings.
- * Splits on whitespace and punctuation boundaries (preserving them as tokens), computes
- * longest-common-subsequence, and returns an HTML string. 
- * Contiguous deletions and insertions are buffered and grouped into single 
- * <span class="chz-diff-del"> / <span class="chz-diff-ins"> tags for readability.
- * All token text is HTML-escaped before insertion.
+ * Groups punctuation and trailing whitespace into the word token to prevent
+ * fragmented diffs and visual word-mashing.
  */
 function wordDiff(base, proposed) {
-    // Tokenize by whitespace OR punctuation, keeping the delimiters in the array.
-    // filter(Boolean) removes the empty string artifacts created by split boundaries.
-    const tokenise       = str => str.split(/(\s+|[.,!?;:'"()[\]{}]+)/).filter(Boolean);
-    const baseTokens     = tokenise(base);
+    // Regex: Match one or more non-space characters (words/punctuation) 
+    // followed by any amount of trailing whitespace.
+    // This creates "semantic units" that prevent the algorithm from
+    // anchoring on common punctuation or spaces in different contexts.
+    const tokenise = str => str.match(/[^\s]+\s*|\s+/g) || [];
+    const baseTokens = tokenise(base);
     const proposedTokens = tokenise(proposed);
 
-    const m  = baseTokens.length;
-    const n  = proposedTokens.length;
+    const m = baseTokens.length;
+    const n = proposedTokens.length;
     const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-    
-    // Build Longest Common Subsequence matrix
+
+    // 1. Build LCS Matrix
     for (let i = m - 1; i >= 0; i--) {
         for (let j = n - 1; j >= 0; j--) {
             dp[i][j] = baseTokens[i] === proposedTokens[j]
@@ -1217,42 +1216,38 @@ function wordDiff(base, proposed) {
 
     const out = [];
     let delBuffer = [];
-    let insBuffer =[];
+    let insBuffer = [];
 
-    // Helper to wrap and push contiguous changes before moving to unchanged text
+    // 2. Buffer Management
     const flushBuffers = () => {
         if (delBuffer.length > 0) {
             out.push(`<span class="chz-diff-del">${escapeHtml(delBuffer.join(''))}</span>`);
-            delBuffer =[];
+            delBuffer = [];
         }
         if (insBuffer.length > 0) {
             out.push(`<span class="chz-diff-ins">${escapeHtml(insBuffer.join(''))}</span>`);
-            insBuffer =[];
+            insBuffer = [];
         }
     };
 
+    // 3. Reconstruction
     let i = 0, j = 0;
     while (i < m || j < n) {
         if (i < m && j < n && baseTokens[i] === proposedTokens[j]) {
-            // Match found: flush any pending changes, then push the unchanged token
             flushBuffers();
             out.push(escapeHtml(baseTokens[i]));
-            i++; 
+            i++;
             j++;
         } else if (j < n && (i >= m || dp[i][j + 1] >= dp[i + 1][j])) {
-            // Insertion
             insBuffer.push(proposedTokens[j]);
             j++;
         } else {
-            // Deletion
             delBuffer.push(baseTokens[i]);
             i++;
         }
     }
-    
-    // Catch any remaining changes at the end of the strings
-    flushBuffers();
 
+    flushBuffers();
     return out.join('');
 }
 
