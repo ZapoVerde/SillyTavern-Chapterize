@@ -9,8 +9,10 @@
  * immediately; the lorebook AI call fires after the lorebook fetch resolves.
  * Steps: (1) Character Workshop — 3-tab bio editor (Draft Bio, AI Raw,
  * Ingester); (2) Situation Workshop — situation summary + turns slider;
- * (3) Lorebook Workshop — freeform AI output + ingester for staging entries;
- * (4) Review & Commit — pre-flight summary and sequential server writes.
+ * (3) Lorebook Workshop — freeform AI output + diff-based ingester with
+ * UID-anchored suggestions, Virtual Document diffing, and regen reconciliation;
+ * (4) Review & Commit — pre-flight summary with pending-review guard and
+ * sequential server writes.
  * All edits are staged in memory. On Finalize, changes are committed sequentially:
  *   1. Character card (create clone or edit-in-place)
  *   2. Lorebook (deferred bulk write of _draftLorebook)
@@ -30,6 +32,10 @@
  * Registers on load: Chapterize button in #extensionsMenu,
  *   settings panel in #extensions_settings, a hidden modal in <body>.
  * Entry point: onChapterizeClick() (bound to button).
+ * Key internal APIs (Character Workshop): wordDiff, parseDescriptionSections,
+ *   applyDescriptionSection, reparseSuggestions.
+ * Key internal APIs (Lorebook Workshop): toVirtualDoc, makeLbDraftEntry,
+ *   enrichLbSuggestions, updateLbDiff, onLbIngesterApply, onLbApplyAllUnresolved.
  * @contract
  *   assertions:
  *     purity: mutates # Modifies module-level session state on each invocation.
@@ -38,13 +44,16 @@
  *       _chapterName, _cloneAvatarUrl, _finalizeSteps,
  *       _suggestionsGenId, _situationGenId, _lorebookGenId,
  *       _lorebookName, _lorebookData, _draftLorebook, _lorebookLoading,
+ *       _lorebookSuggestions, _lbActiveIngesterIndex, _lbDebounceTimer,
+ *       _lorebookFreeformLastParsed,
  *       _currentStep, _lorebookRawText, _lorebookRawError,
  *       extension_settings.chapterize]
  *     external_io: https_apis # generateWithProfile (LLM, via generateRaw or
  *       ConnectionManagerRequestService) and ST /api/* endpoints.
+ *       callPopup (ST UI — Apply All Unresolved confirmation dialog).
  */
 
-import { generateRaw, saveSettingsDebounced, getRequestHeaders, openCharacterChat, getCharacters, selectCharacterById, eventSource, event_types } from '../../../../script.js';
+import { generateRaw, saveSettingsDebounced, getRequestHeaders, openCharacterChat, getCharacters, selectCharacterById, eventSource, event_types, callPopup } from '../../../../script.js';
 import { extension_settings } from '../../../extensions.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
 import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
@@ -205,6 +214,14 @@ let _lorebookName    = '';    // base character name used as lorebook filename
 let _lorebookData    = null;  // {entries:{}} — server copy, loaded on first open
 let _draftLorebook   = null;  // working copy — deep clone of _lorebookData; Apply mutates this only
 let _lorebookLoading = false;
+
+// ─── Lorebook Ingester State ──────────────────────────────────────────────────
+// Persists across Freeform ↔ Ingester tab switches within a session.
+
+let _lorebookSuggestions        = [];   // enriched suggestion objects (see enrichLbSuggestions)
+let _lbActiveIngesterIndex      = 0;    // current selection in lorebook ingester dropdown
+let _lbDebounceTimer            = null; // setTimeout handle for lorebook diff update debounce
+let _lorebookFreeformLastParsed = null; // freeform text at last enrichment; null forces re-enrich
 
 // ─── Wizard State ─────────────────────────────────────────────────────────────
 
@@ -617,6 +634,167 @@ function countDraftChanges() {
     }).length;
 }
 
+// ─── Lorebook Virtual Document ────────────────────────────────────────────────
+
+/**
+ * Builds a "Virtual Document" string from a lorebook entry's three editable
+ * fields. Keys are sorted alphabetically before rendering so that reordering
+ * keys does not produce false diffs.
+ * Pure function — no DOM or module dependencies.
+ */
+function toVirtualDoc(name, keys, content) {
+    const sortedKeys = [...keys].sort((a, b) => a.localeCompare(b));
+    const keyLines   = sortedKeys.length ? sortedKeys.map(k => `KEY: ${k}`).join('\n') : 'KEY: (none)';
+    return `NAME: ${name}\n${keyLines}\n\n${content}`;
+}
+
+/**
+ * Builds a complete ST worldinfo entry object for a new lorebook entry.
+ * Only the "Big Three" (name→comment, keys→key, content) are set from
+ * arguments; all structural/config fields use ST defaults.
+ * Pure function — no DOM or module dependencies.
+ */
+function makeLbDraftEntry(uid, name, keys, content) {
+    return {
+        uid,
+        key:                       keys,
+        keysecondary:              [],
+        comment:                   name,
+        content,
+        constant:                  false,
+        vectorized:                false,
+        selective:                 true,
+        selectiveLogic:            0,
+        addMemo:                   true,
+        order:                     100,
+        position:                  0,
+        disable:                   false,
+        ignoreBudget:              false,
+        excludeRecursion:          false,
+        preventRecursion:          false,
+        matchPersonaDescription:   false,
+        matchCharacterDescription: false,
+        matchCharacterPersonality: false,
+        matchCharacterDepthPrompt: false,
+        matchScenario:             false,
+        matchCreatorNotes:         false,
+        delayUntilRecursion:       0,
+        probability:               100,
+        useProbability:            true,
+        depth:                     4,
+        outletName:                '',
+        group:                     '',
+        groupOverride:             false,
+        groupWeight:               100,
+        scanDepth:                 null,
+        caseSensitive:             null,
+        matchWholeWords:           null,
+        useGroupScoring:           null,
+        automationId:              '',
+        role:                      0,
+        sticky:                    null,
+        cooldown:                  null,
+        delay:                     null,
+        triggers:                  [],
+        displayIndex:              uid,
+    };
+}
+
+// ─── Lorebook Enrichment & Reconciliation ─────────────────────────────────────
+
+/**
+ * Reconciles a freshly-parsed suggestion list against the existing
+ * _lorebookSuggestions array, preserving UID anchors, applied/rejected flags,
+ * and AI snapshots across freeform text changes (e.g. regen or manual edits).
+ *
+ * Matching is done by _aiSnapshot.name so that user-renamed suggestions
+ * (where the live name differs from the original AI name) still match
+ * correctly after a regen that produces the original AI name again.
+ *
+ * Snapshot update policy:
+ *   - Not applied: update snapshot to new AI content (regen produced new text).
+ *   - Applied: keep old snapshot (preserves what was actually applied).
+ *
+ * After matching, a collision guard ensures no two suggestions share the same
+ * linkedUid (the second is demoted to null, treated as a NEW entry).
+ */
+function enrichLbSuggestions(freshParsed) {
+    const enriched = freshParsed.map(fresh => {
+        // Match by the original AI name (snapshot), not the live (possibly user-edited) name.
+        const existing = _lorebookSuggestions.find(
+            s => s._aiSnapshot.name.toLowerCase() === fresh.name.toLowerCase(),
+        );
+
+        if (existing) {
+            if (existing._applied) {
+                // Preserve live values and snapshot — user already committed this suggestion.
+                return {
+                    type:        fresh.type,
+                    name:        existing.name,
+                    keys:        [...existing.keys],
+                    content:     existing.content,
+                    linkedUid:   existing.linkedUid,
+                    _applied:    true,
+                    _rejected:   false,
+                    _aiSnapshot: {
+                        name:    existing._aiSnapshot.name,
+                        keys:    [...existing._aiSnapshot.keys],
+                        content: existing._aiSnapshot.content,
+                    },
+                };
+            } else {
+                // Not yet applied: use fresh AI content, update snapshot, preserve UID anchor and rejection.
+                return {
+                    type:        fresh.type,
+                    name:        fresh.name,
+                    keys:        [...fresh.keys],
+                    content:     fresh.content,
+                    linkedUid:   existing.linkedUid,
+                    _applied:    false,
+                    _rejected:   existing._rejected,
+                    _aiSnapshot: {
+                        name:    fresh.name,
+                        keys:    [...fresh.keys],
+                        content: fresh.content,
+                    },
+                };
+            }
+        } else {
+            // No existing match — fresh enrichment: look up UID in the draft.
+            const uidStr    = matchEntryByComment(fresh.name);
+            const linkedUid = uidStr !== null ? parseInt(uidStr, 10) : null;
+            return {
+                type:        fresh.type,
+                name:        fresh.name,
+                keys:        [...fresh.keys],
+                content:     fresh.content,
+                linkedUid,
+                _applied:    false,
+                _rejected:   false,
+                _aiSnapshot: {
+                    name:    fresh.name,
+                    keys:    [...fresh.keys],
+                    content: fresh.content,
+                },
+            };
+        }
+    });
+
+    // Collision guard: if two suggestions resolved to the same UID, demote the second to null.
+    const seenUids = new Set();
+    for (const s of enriched) {
+        if (s.linkedUid === null) continue;
+        if (seenUids.has(s.linkedUid)) {
+            console.warn(`[Chapterize] Two lorebook suggestions resolved to uid ${s.linkedUid}; treating second as NEW.`);
+            s.linkedUid = null;
+        } else {
+            seenUids.add(s.linkedUid);
+        }
+    }
+
+    return enriched;
+}
+
 /**
  * @section Character Description Parser
  * @architectural-role Domain Logic / Parser
@@ -847,28 +1025,49 @@ const MODAL_HTML = `
       <div id="lbchz-tab-ingester" class="chz-tab-panel chz-hidden">
         <div class="chz-settings-row">
           <label for="lbchz-suggestion-select" data-i18n="chapterize.suggestion_label">Suggestion</label>
-          <select id="lbchz-suggestion-select" class="chz-select"></select>
+          <div class="chz-select-with-nav">
+            <select id="lbchz-suggestion-select" class="chz-select"></select>
+            <button id="lbchz-ingester-next" class="chz-btn chz-btn-secondary chz-btn-sm"
+                    title="Jump to next unresolved suggestion"
+                    data-i18n="[title]chapterize.lb_ingester_next_title">&#x27A1;</button>
+          </div>
         </div>
 
-        <div id="lbchz-update-section" class="chz-hidden">
-          <span class="chz-label" data-i18n="chapterize.current_entry_content">Current entry content (read-only)</span>
-          <textarea id="lbchz-current-content" class="chz-textarea" readonly spellcheck="false"></textarea>
+        <span class="chz-label" data-i18n="chapterize.lb_ingester_diff_label">Diff (draft &#x2192; edit)</span>
+        <div id="lbchz-ingester-diff" class="chz-ingester-diff"></div>
+
+        <div class="chz-settings-row">
+          <label for="lbchz-editor-name" data-i18n="chapterize.lb_editor_name_label">Name</label>
+          <input id="lbchz-editor-name" class="chz-input" type="text" spellcheck="false">
         </div>
 
         <div class="chz-settings-row">
-          <label for="lbchz-suggested-keys" data-i18n="chapterize.keys_label">Keys (comma-separated)</label>
-          <input id="lbchz-suggested-keys" class="chz-input" type="text">
+          <label for="lbchz-editor-keys" data-i18n="chapterize.keys_label">Keys (comma-separated)</label>
+          <input id="lbchz-editor-keys" class="chz-input" type="text" spellcheck="false">
         </div>
 
-        <span class="chz-label" data-i18n="chapterize.suggested_content">Suggested content</span>
-        <textarea id="lbchz-suggested-content" class="chz-textarea" spellcheck="false"></textarea>
+        <span class="chz-label" data-i18n="chapterize.lb_content_label">Content</span>
+        <textarea id="lbchz-editor-content" class="chz-textarea" spellcheck="false"></textarea>
 
         <div id="lbchz-error-ingester" class="chz-error-banner chz-hidden"></div>
 
+        <div class="chz-buttons chz-buttons-split">
+          <div class="chz-btn-group">
+            <button id="lbchz-revert-ai" class="chz-btn chz-btn-secondary"
+                    data-i18n="chapterize.lb_revert_ai">Revert to AI</button>
+            <button id="lbchz-revert-draft" class="chz-btn chz-btn-secondary"
+                    data-i18n="chapterize.lb_revert_draft">Revert to Draft</button>
+          </div>
+          <div class="chz-btn-group">
+            <button id="lbchz-reject-one" class="chz-btn chz-btn-danger"
+                    data-i18n="chapterize.lb_reject_entry">Reject</button>
+            <button id="lbchz-apply-one" class="chz-btn chz-btn-success"
+                    data-i18n="chapterize.apply_entry">Apply</button>
+          </div>
+        </div>
         <div class="chz-buttons">
-          <button id="lbchz-reject-one" class="chz-btn chz-btn-danger" data-i18n="chapterize.lb_reject_entry">Reject Entry</button>
-          <button id="lbchz-apply-one" class="chz-btn chz-btn-primary" data-i18n="chapterize.apply_entry">Apply Entry</button>
-          <button id="lbchz-apply-all" class="chz-btn chz-btn-secondary" data-i18n="chapterize.apply_all">Apply All</button>
+          <button id="lbchz-apply-all-unresolved" class="chz-btn chz-btn-secondary"
+                  data-i18n="chapterize.lb_apply_all_unresolved">Apply All Unresolved</button>
         </div>
       </div>
 
@@ -929,11 +1128,17 @@ function injectModal() {
     $('#chz-regen-situation').on('click', onRegenSituationClick);
 
     // Step 3 — Lorebook Workshop
-    $('#lbchz-regen').on('click',              onLbRegenClick);
-    $('#lbchz-suggestion-select').on('change', onLbSuggestionSelectChange);
-    $('#lbchz-reject-one').on('click',         onLbRejectEntry);
-    $('#lbchz-apply-one').on('click',          onLbApplyEntry);
-    $('#lbchz-apply-all').on('click',          onLbApplyAll);
+    $('#lbchz-regen').on('click',                 onLbRegenClick);
+    $('#lbchz-suggestion-select').on('change',    onLbSuggestionSelectChange);
+    $('#lbchz-editor-name').on('input',           onLbIngesterEditorInput);
+    $('#lbchz-editor-keys').on('input',           onLbIngesterEditorInput);
+    $('#lbchz-editor-content').on('input',        onLbIngesterEditorInput);
+    $('#lbchz-ingester-next').on('click',         onLbIngesterNext);
+    $('#lbchz-revert-ai').on('click',             onLbIngesterRevertAi);
+    $('#lbchz-revert-draft').on('click',          onLbIngesterRevertDraft);
+    $('#lbchz-reject-one').on('click',            onLbIngesterReject);
+    $('#lbchz-apply-one').on('click',             onLbIngesterApply);
+    $('#lbchz-apply-all-unresolved').on('click',  onLbApplyAllUnresolved);
     // Lorebook tab switching — scoped to #lbchz-tab-bar
     $('#chz-modal').on('click', '#lbchz-tab-bar .chz-tab-btn', function () {
         onLbTabSwitch($(this).data('tab'));
@@ -979,6 +1184,11 @@ function closeModal() {
     _lorebookData    = null;
     _draftLorebook   = null;
     _lorebookLoading = false;
+    _lorebookSuggestions        = [];
+    _lbActiveIngesterIndex      = 0;
+    clearTimeout(_lbDebounceTimer);
+    _lbDebounceTimer            = null;
+    _lorebookFreeformLastParsed = null;
     _currentStep     = 1;
     _lorebookRawText  = '';
     _lorebookRawError = '';
@@ -1012,6 +1222,9 @@ function initWizardSession() {
     $('#chz-receipts-content').empty();
     $('#chz-cancel').text('Cancel').prop('disabled', false);
 
+    _lorebookSuggestions        = [];
+    _lbActiveIngesterIndex      = 0;
+    _lorebookFreeformLastParsed = null;
     _lorebookRawText  = '';
     _lorebookRawError = '';
 
@@ -1048,9 +1261,13 @@ function populateStep4Summary() {
     const loreCount = countDraftChanges();
     const mode = _isChapterMode ? 'edit-in-place' : 'clone';
     const loreLabel = loreCount === 1 ? '1 entry' : `${loreCount} entries`;
+    const pendingLb = _lorebookSuggestions.filter(s => !s._applied && !s._rejected).length;
+    const pendingText = pendingLb > 0
+        ? ` \u26a0 ${pendingLb} suggestion${pendingLb !== 1 ? 's' : ''} pending review`
+        : '';
     $('#chz-step4-target').text(`Target: ${_cloneName} (${mode})`);
     $('#chz-step4-context').text(`Context: ${lastN.length} messages being carried (${turnsToCarry} turns)`);
-    $('#chz-step4-lore').text(`Lore: ${loreLabel} staged for update/creation`);
+    $('#chz-step4-lore').text(`Lore: ${loreLabel} staged for update/creation${pendingText}`);
 }
 
 /**
@@ -1574,6 +1791,7 @@ function setLbLoading(isLoading) {
 function populateLbFreeform(text) {
     setLbLoading(false);
     $('#lbchz-freeform').val(text);
+    _lorebookFreeformLastParsed = null; // force re-enrichment on next Ingester tab switch
 }
 
 function showLbError(message) {
@@ -1584,16 +1802,32 @@ function showLbError(message) {
 /**
  * @section Lorebook Workshop
  * @architectural-role UI Orchestration / Staging
- * @description Handles lorebook suggestion parsing and in-memory drafting.
+ * @description Handles lorebook suggestion enrichment, diffing, and in-memory drafting.
+ *   Implements the Draft/Ingest pattern: suggestions are enriched with UID anchors and
+ *   AI snapshots on Ingester tab entry. The Virtual Document (toVirtualDoc) flattens
+ *   Name + Keys + Content into a single string for wordDiff comparison.
  * @core-principles
  *   1. MUST NOT commit writes to server; all changes must be staged in _draftLorebook.
- *   2. Must provide visual confirmation of "staged" vs "unstaged" entries.
- * @api-declaration onLbTabSwitch, lbApplySuggestion, matchEntryByComment
+ *   2. _lorebookSuggestions persists across tab switches; re-enrichment only when
+ *      freeform text changes (detected via _lorebookFreeformLastParsed).
+ *   3. linkedUid is the sole authority for entry identity; type (UPDATE/NEW) is
+ *      informational only after enrichment.
+ * @api-declaration
+ *   Tab control:   onLbTabSwitch
+ *   Enrichment:    enrichLbSuggestions (reconciliation loop)
+ *   Dropdown:      populateLbIngesterDropdown
+ *   Detail pane:   renderLbIngesterDetail, updateLbDiff
+ *   Editor input:  onLbIngesterEditorInput (debounced, syncs all 3 boxes)
+ *   Navigation:    onLbIngesterNext
+ *   Revert:        onLbIngesterRevertAi, onLbIngesterRevertDraft
+ *   Apply/Reject:  onLbIngesterApply, onLbIngesterReject, onLbApplyAllUnresolved
  * @contract
  *   assertions:
  *     purity: impure (DOM)
- *     state_ownership: [_draftLorebook, _lorebookData, _lorebookName]
- *     external_io: none
+ *     state_ownership: [_draftLorebook, _lorebookData, _lorebookName,
+ *       _lorebookSuggestions, _lbActiveIngesterIndex, _lbDebounceTimer,
+ *       _lorebookFreeformLastParsed]
+ *     external_io: callPopup # confirmation dialog for Apply All Unresolved
  */
 function onLbTabSwitch(tabName) {
     $('#lbchz-tab-bar .chz-tab-btn').each(function () {
@@ -1602,174 +1836,295 @@ function onLbTabSwitch(tabName) {
     $('#lbchz-tab-freeform').toggleClass('chz-hidden', tabName !== 'freeform');
     $('#lbchz-tab-ingester').toggleClass('chz-hidden', tabName !== 'ingester');
 
-    // Re-parse freeform whenever ingester tab is opened so edits are reflected
     if (tabName === 'ingester') {
-        const suggestions = parseLbSuggestions($('#lbchz-freeform').val());
-        populateLbIngesterDropdown(suggestions);
-        if (suggestions.length) renderLbIngesterDetail(suggestions[0]);
+        if (!_lorebookLoading) {
+            const currentText = $('#lbchz-freeform').val();
+            if (currentText !== _lorebookFreeformLastParsed) {
+                // Freeform text changed (or null sentinel) — re-parse and reconcile.
+                const freshParsed = parseLbSuggestions(currentText);
+                _lorebookSuggestions = enrichLbSuggestions(freshParsed);
+                _lorebookFreeformLastParsed = currentText;
+                if (_lbActiveIngesterIndex >= _lorebookSuggestions.length) {
+                    _lbActiveIngesterIndex = 0;
+                }
+            }
+        }
+        _lbActiveIngesterIndex = Math.max(
+            0,
+            Math.min(_lbActiveIngesterIndex, _lorebookSuggestions.length - 1),
+        );
+        populateLbIngesterDropdown();
+        if (_lorebookSuggestions[_lbActiveIngesterIndex]) {
+            renderLbIngesterDetail(_lorebookSuggestions[_lbActiveIngesterIndex]);
+        }
     }
 }
 
-function populateLbIngesterDropdown(suggestions) {
+function populateLbIngesterDropdown() {
     const $sel = $('#lbchz-suggestion-select').empty();
-    if (!suggestions.length) {
+    if (!_lorebookSuggestions.length) {
         $sel.append('<option disabled selected>(no suggestions parsed — check Freeform tab)</option>');
-        $('#lbchz-apply-one, #lbchz-apply-all').prop('disabled', true);
-        $('#lbchz-suggested-keys').val('');
-        $('#lbchz-suggested-content').val('');
-        $('#lbchz-update-section').addClass('chz-hidden');
+        $('#lbchz-apply-one, #lbchz-apply-all-unresolved').prop('disabled', true);
+        $('#lbchz-editor-name').val('');
+        $('#lbchz-editor-keys').val('');
+        $('#lbchz-editor-content').val('');
+        $('#lbchz-ingester-diff').empty();
         return;
     }
-    suggestions.forEach((s, i) => {
-        $sel.append(`<option value="${i}">${s.type}: ${escapeHtml(s.name)}</option>`);
+    _lorebookSuggestions.forEach((s, i) => {
+        const prefix = s._applied ? '\u2713 ' : (s._rejected ? '\u2717 ' : '');
+        $sel.append(`<option value="${i}">${escapeHtml(`${prefix}${s.type}: ${s.name}`)}</option>`);
     });
-    $('#lbchz-apply-one, #lbchz-apply-all').prop('disabled', false);
+    $sel.val(_lbActiveIngesterIndex);
+    $('#lbchz-apply-one, #lbchz-apply-all-unresolved').prop('disabled', false);
 }
 
+/**
+ * Populates the three editor boxes and diff pane from a suggestion object.
+ * Called on dropdown selection change and after apply/revert operations.
+ */
 function renderLbIngesterDetail(suggestion) {
     if (!suggestion) return;
-    $('#lbchz-suggested-keys').val(suggestion.keys.join(', '));
-    $('#lbchz-suggested-content').val(suggestion.content);
+    $('#lbchz-editor-name').val(suggestion.name);
+    $('#lbchz-editor-keys').val(suggestion.keys.join(', '));
+    $('#lbchz-editor-content').val(suggestion.content);
     $('#lbchz-error-ingester').addClass('chz-hidden').text('');
+    // Revert to Draft requires an existing linked entry in the draft
+    $('#lbchz-revert-draft').prop('disabled', suggestion.linkedUid === null);
+    updateLbDiff();
+}
 
-    if (suggestion.type === 'UPDATE') {
-        const uid = matchEntryByComment(suggestion.name);
-        const currentContent = uid !== null
-            ? (_draftLorebook.entries[uid].content || '')
-            : '(no existing entry matched — will create new)';
-        $('#lbchz-current-content').val(currentContent);
-        $('#lbchz-update-section').removeClass('chz-hidden');
-    } else {
-        $('#lbchz-update-section').addClass('chz-hidden');
+/**
+ * Re-computes the Virtual Document diff and updates the diff pane.
+ * Base: the current _draftLorebook entry (if linkedUid is set); empty string for NEW.
+ * Proposed: the current values of the three editor boxes.
+ * A NEW entry shows the entire Virtual Document as a green insertion.
+ */
+function updateLbDiff() {
+    const suggestion = _lorebookSuggestions[_lbActiveIngesterIndex];
+    if (!suggestion) return;
+
+    const name    = $('#lbchz-editor-name').val();
+    const keys    = $('#lbchz-editor-keys').val().split(',').map(k => k.trim()).filter(Boolean);
+    const content = $('#lbchz-editor-content').val();
+    const proposed = toVirtualDoc(name, keys, content);
+
+    let base = '';
+    if (suggestion.linkedUid !== null) {
+        const entry = _draftLorebook?.entries?.[String(suggestion.linkedUid)];
+        if (entry) {
+            base = toVirtualDoc(
+                entry.comment || '',
+                Array.isArray(entry.key) ? entry.key : [],
+                entry.content || '',
+            );
+        }
     }
+
+    $('#lbchz-ingester-diff').html(wordDiff(base, proposed));
 }
 
 function onLbSuggestionSelectChange() {
-    const suggestions = parseLbSuggestions($('#lbchz-freeform').val());
     const idx = parseInt($('#lbchz-suggestion-select').val(), 10);
-    if (!isNaN(idx) && suggestions[idx]) {
-        renderLbIngesterDetail(suggestions[idx]);
+    if (!isNaN(idx) && _lorebookSuggestions[idx]) {
+        _lbActiveIngesterIndex = idx;
+        renderLbIngesterDetail(_lorebookSuggestions[idx]);
     }
+}
+
+/**
+ * Handles input from any of the three editor boxes.
+ * Syncs all three live values back onto the suggestion object (so Apply All
+ * and tab-switch preservation see the latest edits), updates the dropdown
+ * label by index when the name changes, then schedules a debounced diff update.
+ */
+function onLbIngesterEditorInput() {
+    const s = _lorebookSuggestions[_lbActiveIngesterIndex];
+    if (s) {
+        const newName = $('#lbchz-editor-name').val();
+        s.name    = newName;
+        s.keys    = $('#lbchz-editor-keys').val().split(',').map(k => k.trim()).filter(Boolean);
+        s.content = $('#lbchz-editor-content').val();
+        // Update dropdown label by index — avoids text-match failure while name is being typed.
+        const prefix = s._applied ? '\u2713 ' : (s._rejected ? '\u2717 ' : '');
+        $('#lbchz-suggestion-select option').eq(_lbActiveIngesterIndex).text(
+            escapeHtml(`${prefix}${s.type}: ${newName}`),
+        );
+    }
+    clearTimeout(_lbDebounceTimer);
+    _lbDebounceTimer = setTimeout(updateLbDiff, 100);
+}
+
+/**
+ * Reverts the three editor boxes to the original AI suggestion (_aiSnapshot).
+ * If the suggestion was not yet applied, the snapshot reflects the most recent
+ * AI generation. If applied, it reflects the AI text at the time of application.
+ */
+function onLbIngesterRevertAi() {
+    const s = _lorebookSuggestions[_lbActiveIngesterIndex];
+    if (!s) return;
+    s.name    = s._aiSnapshot.name;
+    s.keys    = [...s._aiSnapshot.keys];
+    s.content = s._aiSnapshot.content;
+    renderLbIngesterDetail(s);
+    const prefix = s._applied ? '\u2713 ' : (s._rejected ? '\u2717 ' : '');
+    $('#lbchz-suggestion-select option').eq(_lbActiveIngesterIndex).text(
+        escapeHtml(`${prefix}${s.type}: ${s.name}`),
+    );
+}
+
+/**
+ * Reverts the three editor boxes to whatever is currently in _draftLorebook
+ * for the linked entry. Button is disabled when linkedUid is null (NEW, pre-apply).
+ */
+function onLbIngesterRevertDraft() {
+    const s = _lorebookSuggestions[_lbActiveIngesterIndex];
+    if (!s || s.linkedUid === null) return;
+    const entry = _draftLorebook?.entries?.[String(s.linkedUid)];
+    if (!entry) return;
+    s.name    = entry.comment || '';
+    s.keys    = Array.isArray(entry.key) ? [...entry.key] : [];
+    s.content = entry.content || '';
+    renderLbIngesterDetail(s);
+    const prefix = s._applied ? '\u2713 ' : (s._rejected ? '\u2717 ' : '');
+    $('#lbchz-suggestion-select option').eq(_lbActiveIngesterIndex).text(
+        escapeHtml(`${prefix}${s.type}: ${s.name}`),
+    );
+}
+
+/**
+ * Scans from the item after the current selection for the first suggestion that
+ * is neither applied nor rejected, then navigates to it.
+ */
+function onLbIngesterNext() {
+    const total = _lorebookSuggestions.length;
+    if (!total) return;
+    for (let offset = 1; offset < total; offset++) {
+        const i = (_lbActiveIngesterIndex + offset) % total;
+        if (!_lorebookSuggestions[i]._applied && !_lorebookSuggestions[i]._rejected) {
+            _lbActiveIngesterIndex = i;
+            $('#lbchz-suggestion-select').val(i);
+            renderLbIngesterDetail(_lorebookSuggestions[i]);
+            return;
+        }
+    }
+    toastr.info('All lorebook suggestions have been reviewed.');
+}
+
+function updateLbPendingWarning() {
+    // Pending state is surfaced in the Step 4 summary (populateStep4Summary).
+    // No inline warning banner in the Lorebook Ingester itself.
 }
 
 // ─── Lorebook Apply ───────────────────────────────────────────────────────────
 
 /**
- * Stages a single suggestion into _draftLorebook (no server write).
- * For UPDATE: mutates the matched entry (or creates new if no match).
- * For NEW: always creates a new entry with ST worldinfo defaults.
- * The actual server write happens on Finalize.
+ * Applies the current editor values to _draftLorebook (no server write).
+ * If linkedUid exists: mutates the existing entry's Big Three fields only.
+ * If linkedUid is null (NEW): creates a new entry and promotes linkedUid so
+ *   subsequent edits update that specific entry rather than creating a second.
+ * Refreshes the diff pane so the newly-written draft becomes the new base.
  */
-function lbApplySuggestion({ type, name, keys, content }) {
-    const uid = matchEntryByComment(name);
-    if (uid !== null && type === 'UPDATE') {
-        // Mutate existing entry in the draft
-        _draftLorebook.entries[uid].content = content;
-        _draftLorebook.entries[uid].key     = keys;
-    } else {
-        // Create new entry in the draft (also handles unmatched UPDATE)
-        const newUid = nextLorebookUid();
-        _draftLorebook.entries[String(newUid)] = {
-            uid:                        newUid,
-            key:                        keys,
-            keysecondary:               [],
-            comment:                    name,
-            content:                    content,
-            constant:                   false,
-            vectorized:                 false,
-            selective:                  true,
-            selectiveLogic:             0,
-            addMemo:                    true,
-            order:                      100,
-            position:                   0,
-            disable:                    false,
-            ignoreBudget:               false,
-            excludeRecursion:           false,
-            preventRecursion:           false,
-            matchPersonaDescription:    false,
-            matchCharacterDescription:  false,
-            matchCharacterPersonality:  false,
-            matchCharacterDepthPrompt:  false,
-            matchScenario:              false,
-            matchCreatorNotes:          false,
-            delayUntilRecursion:        0,
-            probability:                100,
-            useProbability:             true,
-            depth:                      4,
-            outletName:                 '',
-            group:                      '',
-            groupOverride:              false,
-            groupWeight:                100,
-            scanDepth:                  null,
-            caseSensitive:              null,
-            matchWholeWords:            null,
-            useGroupScoring:            null,
-            automationId:               '',
-            role:                       0,
-            sticky:                     null,
-            cooldown:                   null,
-            delay:                      null,
-            triggers:                   [],
-            displayIndex:               newUid,
-        };
-    }
-    // No server write — _draftLorebook is committed in bulk on Finalize
-}
+function onLbIngesterApply() {
+    const s = _lorebookSuggestions[_lbActiveIngesterIndex];
+    if (!s) return;
 
-function onLbRejectEntry() {
-    const idx = parseInt($('#lbchz-suggestion-select').val(), 10);
-    if (isNaN(idx)) return;
+    const name    = $('#lbchz-editor-name').val().trim();
+    const keys    = $('#lbchz-editor-keys').val().split(',').map(k => k.trim()).filter(Boolean);
+    const content = $('#lbchz-editor-content').val().trim();
+    if (!name || !content) return;
 
-    // Visually mark the dropdown option as rejected
-    const $opt = $('#lbchz-suggestion-select option:selected');
-    let baseText = $opt.text().replace(/^(\u2713 staged: |\u2717 rejected: )/, '');
-    $opt.text('\u2717 rejected: ' + baseText);
-}
+    // Sync live values onto the suggestion object
+    s.name    = name;
+    s.keys    = keys;
+    s.content = content;
 
-function onLbApplyEntry() {
-    const suggestions = parseLbSuggestions($('#lbchz-freeform').val());
-    const idx = parseInt($('#lbchz-suggestion-select').val(), 10);
-    if (isNaN(idx) || !suggestions[idx]) return;
-
-    // Use type + name from the parsed suggestion, but keys + content from the
-    // (potentially edited) UI fields so the user's changes are honoured.
-    const suggestion = {
-        type:    suggestions[idx].type,
-        name:    suggestions[idx].name,
-        keys:    $('#lbchz-suggested-keys').val().split(',').map(k => k.trim()).filter(Boolean),
-        content: $('#lbchz-suggested-content').val().trim(),
-    };
-
-    $('#lbchz-error-ingester').addClass('chz-hidden').text('');
-    lbApplySuggestion(suggestion);
-
-    // Mark entry as staged in the dropdown
-    const $opt = $('#lbchz-suggestion-select option:selected');
-    let baseText = $opt.text().replace(/^(\u2713 staged: |\u2717 rejected: )/, '');
-    $opt.text('\u2713 staged: ' + baseText);
-    // Refresh current-content pane to show the newly staged value
-    renderLbIngesterDetail(suggestions[idx]);
-}
-
-function onLbApplyAll() {
-    const suggestions = parseLbSuggestions($('#lbchz-freeform').val());
-    if (!suggestions.length) return;
-
-    $('#lbchz-error-ingester').addClass('chz-hidden').text('');
-
-    // Sequential application — avoids uid collision when multiple NEW entries are staged
-    for (const s of suggestions) {
-        lbApplySuggestion(s);
-    }
-
-    toastr.success(`Staged ${suggestions.length} lorebook suggestion${suggestions.length !== 1 ? 's' : ''} — will be saved on Finalize.`);
-    $('#lbchz-suggestion-select option').each(function () {
-        if (!$(this).text().startsWith('\u2713')) {
-            // Strip any existing "rejected" prefix before adding the "staged" prefix
-            let baseText = $(this).text().replace(/^\u2717 rejected:\s*/, '');
-            $(this).text('\u2713 staged: ' + baseText);
+    if (s.linkedUid !== null) {
+        const entry = _draftLorebook.entries[String(s.linkedUid)];
+        if (entry) {
+            entry.comment = name;
+            entry.key     = keys;
+            entry.content = content;
         }
-    });
+    } else {
+        const newUid = nextLorebookUid();
+        _draftLorebook.entries[String(newUid)] = makeLbDraftEntry(newUid, name, keys, content);
+        s.linkedUid = newUid;
+        // Revert to Draft is now enabled since the entry exists
+        $('#lbchz-revert-draft').prop('disabled', false);
+    }
+
+    s._applied  = true;
+    s._rejected = false;
+    $('#lbchz-suggestion-select option').eq(_lbActiveIngesterIndex).text(
+        escapeHtml(`\u2713 ${s.type}: ${s.name}`),
+    );
+
+    // Refresh diff — draft (what we just wrote) is now the base
+    updateLbDiff();
+    updateLbPendingWarning();
+}
+
+function onLbIngesterReject() {
+    const s = _lorebookSuggestions[_lbActiveIngesterIndex];
+    if (!s) return;
+    s._rejected = true;
+    s._applied  = false;
+    $('#lbchz-suggestion-select option').eq(_lbActiveIngesterIndex).text(
+        escapeHtml(`\u2717 ${s.type}: ${s.name}`),
+    );
+    updateLbPendingWarning();
+}
+
+/**
+ * Applies all unresolved (not applied, not rejected) suggestions in one pass
+ * after a callPopup confirmation. Uses the live suggestion object values
+ * (which reflect any editor edits via onLbIngesterEditorInput) for each entry.
+ */
+async function onLbApplyAllUnresolved() {
+    const unresolved = _lorebookSuggestions.filter(s => !s._applied && !s._rejected);
+    if (!unresolved.length) {
+        toastr.info('No unresolved lorebook suggestions to apply.');
+        return;
+    }
+
+    const count     = unresolved.length;
+    const confirmed = await callPopup(
+        `This will apply all ${count} unreviewed suggestion${count !== 1 ? 's' : ''} to the Lorebook using the AI's current text. Continue?`,
+        'confirm',
+    );
+    if (!confirmed) return;
+
+    for (const s of unresolved) {
+        const name    = s.name.trim();
+        const keys    = [...s.keys];
+        const content = s.content.trim();
+        if (!name || !content) continue;
+
+        if (s.linkedUid !== null) {
+            const entry = _draftLorebook.entries[String(s.linkedUid)];
+            if (entry) {
+                entry.comment = name;
+                entry.key     = keys;
+                entry.content = content;
+            }
+        } else {
+            const newUid = nextLorebookUid();
+            _draftLorebook.entries[String(newUid)] = makeLbDraftEntry(newUid, name, keys, content);
+            s.linkedUid = newUid;
+        }
+        s._applied  = true;
+        s._rejected = false;
+    }
+
+    populateLbIngesterDropdown();
+    if (_lorebookSuggestions[_lbActiveIngesterIndex]) {
+        renderLbIngesterDetail(_lorebookSuggestions[_lbActiveIngesterIndex]);
+    }
+    updateLbPendingWarning();
+    toastr.success(
+        `Applied ${count} lorebook suggestion${count !== 1 ? 's' : ''} — will be saved on Finalize.`,
+    );
 }
 
 // ─── Event Handlers ───────────────────────────────────────────────────────────
