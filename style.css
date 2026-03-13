@@ -409,19 +409,33 @@
     border-color: var(--chz-btn-primary-bg);
 }
 
-/* ─── Ingester Panels (side-by-side) ─────────────────────────────────────── */
+/* ─── Ingester Diff Viewer ────────────────────────────────────────────────── */
 
-.chz-ingester-panels {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: var(--chz-gap);
+.chz-ingester-diff {
+    min-height: var(--chz-textarea-h);
+    max-height: calc(var(--chz-textarea-h) * 2);
+    overflow-y: auto;
+    background: var(--chz-input-bg);
+    border: 1px solid var(--chz-input-border);
+    border-radius: var(--chz-input-radius);
+    padding: var(--chz-input-pad);
+    font-size: 0.85rem;
+    font-family: inherit;
+    line-height: 1.45;
+    color: var(--chz-text);
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
-.chz-ingester-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0; /* prevent grid blowout */
+.chz-diff-del {
+    background: rgba(220, 60, 60, 0.35);
+    color: #ffd0d0;
+    text-decoration: line-through;
+}
+
+.chz-diff-ins {
+    background: rgba(60, 180, 60, 0.35);
+    color: #d0ffd0;
 }
 
 /* ─── Left-aligned button row ────────────────────────────────────────────── */
@@ -496,7 +510,5 @@
         flex-wrap: wrap;
     }
 
-    .chz-ingester-panels {
-        grid-template-columns: 1fr;
-    }
+
 }

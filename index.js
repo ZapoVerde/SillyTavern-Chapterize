@@ -31,6 +31,7 @@
  *   assertions:
  *     purity: mutates # Modifies module-level session state on each invocation.
  *     state_ownership: [_transcript, _originalDescription, _cardSuggestions,
+ *       _ingesterSnapshot, _ingesterDebounceTimer,
  *       _chapterName, _cloneAvatarUrl, _finalizeSteps,
  *       _suggestionsGenId, _situationGenId, _lorebookGenId,
  *       _lorebookName, _lorebookData, _draftLorebook, _lorebookLoading,
@@ -177,6 +178,8 @@ let _lorebookGenId           = 0;
 
 // Character Workshop state
 let _cardSuggestions         = [];      // parsed suggestion objects from last card AI call
+let _ingesterSnapshot        = '';      // AI suggestion text at selection time; powers Revert
+let _ingesterDebounceTimer   = null;    // setTimeout handle for diff update debounce
 
 // Finalize commit state — set during card save step, persisted for retries
 let _chapterName             = '';      // derived chat file name (e.g. "ch2")
@@ -747,21 +750,17 @@ const MODAL_HTML = `
           <label for="chz-ingester-select" data-i18n="chapterize.suggestion_label">Suggestion</label>
           <select id="chz-ingester-select" class="chz-select"></select>
         </div>
-        <div class="chz-ingester-panels">
-          <div class="chz-ingester-panel">
-            <span class="chz-label" data-i18n="chapterize.current_draft_block">Current Draft</span>
-            <textarea id="chz-ingester-current" class="chz-textarea" readonly spellcheck="false"></textarea>
-          </div>
-          <div class="chz-ingester-panel">
-            <span class="chz-label" data-i18n="chapterize.ai_suggestion">AI Suggestion</span>
-            <textarea id="chz-ingester-suggestion" class="chz-textarea" spellcheck="false"></textarea>
-          </div>
-        </div>
+        <span class="chz-label" data-i18n="chapterize.ingester_diff_label">Diff (bio → edit)</span>
+        <div id="chz-ingester-diff" class="chz-ingester-diff"></div>
+        <span class="chz-label" data-i18n="chapterize.ingester_edit_label">Edit</span>
+        <textarea id="chz-ingester-editor" class="chz-textarea" spellcheck="false"></textarea>
         <div id="chz-ingester-warning" class="chz-warn chz-hidden"
              data-i18n="chapterize.ingester_no_match">No matching section found in Draft Bio.</div>
         <div class="chz-buttons">
+          <button id="chz-ingester-revert" class="chz-btn chz-btn-secondary"
+                  data-i18n="chapterize.ingester_revert">Revert to AI</button>
           <button id="chz-ingester-apply" class="chz-btn chz-btn-primary"
-                  data-i18n="chapterize.apply_entry">Apply</button>
+                  data-i18n="chapterize.ingester_apply">Apply to Bio</button>
         </div>
       </div>
 
@@ -868,6 +867,8 @@ function injectModal() {
     $('#chz-cancel-2').on('click',          closeModal);
     $('#chz-revert-bio').on('click',        onRevertBioClick);
     $('#chz-ingester-select').on('change',  onIngesterSectionChange);
+    $('#chz-ingester-editor').on('input',   onIngesterEditorInput);
+    $('#chz-ingester-revert').on('click',   onIngesterRevertClick);
     $('#chz-ingester-apply').on('click',    onIngesterApplyClick);
 
     // Workshop tab switching — delegated to preserve bindings after modal re-inject
@@ -892,6 +893,9 @@ function closeModal() {
     _originalDescription     = '';
     _priorSituation          = '';
     _cardSuggestions         = [];
+    _ingesterSnapshot        = '';
+    clearTimeout(_ingesterDebounceTimer);
+    _ingesterDebounceTimer   = null;
     _chapterName             = '';
     _cloneAvatarUrl          = '';
     _suggestionsLoading      = false;
@@ -941,11 +945,12 @@ function showStep2() {
  * @core-principles
  *   1. The Draft Bio textarea is the authoritative source of truth.
  *   2. The Ingester re-parses AI Raw on every tab-switch unless generation is in progress.
- * @api-declaration onWorkshopTabSwitch, reparseSuggestions, populateIngesterDropdown, renderIngesterDetail
+ * @api-declaration onWorkshopTabSwitch, reparseSuggestions, populateIngesterDropdown,
+ *   wordDiff, renderIngesterDetail, onIngesterEditorInput, onIngesterRevertClick
  * @contract
  *   assertions:
  *     purity: impure (DOM)
- *     state_ownership: [_cardSuggestions]
+ *     state_ownership: [_cardSuggestions, _ingesterSnapshot, _ingesterDebounceTimer]
  *     external_io: none
  */
 
@@ -1054,8 +1059,9 @@ function populateIngesterDropdown() {
     if (!_cardSuggestions.length) {
         $sel.append('<option disabled selected>(no suggestions — check AI Raw tab)</option>');
         $('#chz-ingester-apply').prop('disabled', true);
-        $('#chz-ingester-current').val('');
-        $('#chz-ingester-suggestion').val('');
+        $('#chz-ingester-revert').prop('disabled', true);
+        $('#chz-ingester-diff').empty();
+        $('#chz-ingester-editor').val('');
         $('#chz-ingester-warning').addClass('chz-hidden');
         return;
     }
@@ -1080,14 +1086,56 @@ function populateIngesterDropdown() {
 }
 
 /**
- * Renders the detail pane for the given suggestion: looks up the matching
- * section in the current Draft Bio and populates Current Draft / AI Suggestion.
+ * Word-level LCS diff between two strings.
+ * Splits on whitespace boundaries (preserving whitespace as tokens), computes
+ * longest-common-subsequence, and returns an HTML string with
+ * <span class="chz-diff-del"> / <span class="chz-diff-ins"> markup.
+ * All token text is HTML-escaped before insertion.
+ */
+function wordDiff(base, proposed) {
+    const tokenise      = str => str.split(/(\s+)/);
+    const baseTokens    = tokenise(base);
+    const proposedTokens = tokenise(proposed);
+
+    const m  = baseTokens.length;
+    const n  = proposedTokens.length;
+    const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+    for (let i = m - 1; i >= 0; i--) {
+        for (let j = n - 1; j >= 0; j--) {
+            dp[i][j] = baseTokens[i] === proposedTokens[j]
+                ? dp[i + 1][j + 1] + 1
+                : Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+    }
+
+    let html = '';
+    let i = 0, j = 0;
+    while (i < m || j < n) {
+        if (i < m && j < n && baseTokens[i] === proposedTokens[j]) {
+            html += escapeHtml(baseTokens[i]);
+            i++; j++;
+        } else if (j < n && (i >= m || dp[i][j + 1] >= dp[i + 1][j])) {
+            html += `<span class="chz-diff-ins">${escapeHtml(proposedTokens[j])}</span>`;
+            j++;
+        } else {
+            html += `<span class="chz-diff-del">${escapeHtml(baseTokens[i])}</span>`;
+            i++;
+        }
+    }
+    return html;
+}
+
+/**
+ * Renders the ingester detail for the given suggestion: stores the AI snapshot,
+ * populates the editor, and computes the initial diff against the matching bio section.
  */
 function renderIngesterDetail(suggestion) {
     if (!suggestion) return;
-    $('#chz-ingester-suggestion').val(suggestion.content);
+    _ingesterSnapshot = suggestion.content;
+    $('#chz-ingester-editor').val(suggestion.content);
     $('#chz-ingester-warning').addClass('chz-hidden');
     $('#chz-ingester-apply').prop('disabled', false);
+    $('#chz-ingester-revert').prop('disabled', false);
 
     const bioText     = $('#chz-card-text').val();
     const sections    = parseDescriptionSections(bioText);
@@ -1095,7 +1143,7 @@ function renderIngesterDetail(suggestion) {
 
     // Determine which occurrence of this header the suggestion targets —
     // the nth suggestion for a given header maps to the nth bio section.
-    const suggestionIdx   = _cardSuggestions.indexOf(suggestion);
+    const suggestionIdx    = _cardSuggestions.indexOf(suggestion);
     const targetOccurrence = _cardSuggestions
         .slice(0, suggestionIdx + 1)
         .filter(s => s.header.toLowerCase() === headerLower)
@@ -1106,10 +1154,11 @@ function renderIngesterDetail(suggestion) {
     );
 
     if (match) {
-        const lines = bioText.split('\n');
-        $('#chz-ingester-current').val(lines.slice(match.startLine, match.endLine + 1).join('\n'));
+        const lines    = bioText.split('\n');
+        const baseText = lines.slice(match.startLine, match.endLine + 1).join('\n');
+        $('#chz-ingester-diff').html(wordDiff(baseText, suggestion.content));
     } else {
-        $('#chz-ingester-current').val('');
+        $('#chz-ingester-diff').empty();
         $('#chz-ingester-warning').removeClass('chz-hidden');
         $('#chz-ingester-apply').prop('disabled', true);
     }
@@ -1127,7 +1176,7 @@ function onIngesterApplyClick() {
     if (isNaN(idx) || !_cardSuggestions[idx]) return;
 
     const suggestion  = _cardSuggestions[idx];
-    const newContent  = $('#chz-ingester-suggestion').val();
+    const newContent  = $('#chz-ingester-editor').val();
     const bioText     = $('#chz-card-text').val();
     const sections    = parseDescriptionSections(bioText);
     const headerLower = suggestion.header.toLowerCase();
@@ -1153,9 +1202,44 @@ function onIngesterApplyClick() {
         $opt.text('\u2713 ' + $opt.text());
     }
 
-    // Refresh the Current Draft pane to show the applied content
+    // Refresh the diff pane to show the applied content as the new base
     renderIngesterDetail(_cardSuggestions[idx]);
     updatePendingWarning();
+}
+
+function onIngesterEditorInput() {
+    clearTimeout(_ingesterDebounceTimer);
+    _ingesterDebounceTimer = setTimeout(() => {
+        const idx = parseInt($('#chz-ingester-select').val(), 10);
+        if (isNaN(idx) || !_cardSuggestions[idx]) return;
+
+        const suggestion   = _cardSuggestions[idx];
+        const headerLower  = suggestion.header.toLowerCase();
+        const bioText      = $('#chz-card-text').val();
+        const sections     = parseDescriptionSections(bioText);
+
+        const suggestionIdx    = _cardSuggestions.indexOf(suggestion);
+        const targetOccurrence = _cardSuggestions
+            .slice(0, suggestionIdx + 1)
+            .filter(s => s.header.toLowerCase() === headerLower)
+            .length;
+
+        const match = sections.find(
+            s => s.header.toLowerCase() === headerLower && s.index === targetOccurrence,
+        );
+        if (!match) return;
+
+        const lines    = bioText.split('\n');
+        const baseText = lines.slice(match.startLine, match.endLine + 1).join('\n');
+        $('#chz-ingester-diff').html(wordDiff(baseText, $('#chz-ingester-editor').val()));
+    }, 100);
+}
+
+function onIngesterRevertClick() {
+    const idx = parseInt($('#chz-ingester-select').val(), 10);
+    if (!isNaN(idx) && _cardSuggestions[idx]) {
+        renderIngesterDetail(_cardSuggestions[idx]);
+    }
 }
 
 function onRevertBioClick() {
