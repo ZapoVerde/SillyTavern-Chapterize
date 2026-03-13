@@ -280,6 +280,17 @@
     border-color: var(--chz-text-muted);
 }
 
+.chz-btn-danger {
+    background: rgba(224, 85, 85, 0.15);
+    color: var(--chz-error-fg);
+    border-color: rgba(224, 85, 85, 0.3);
+}
+
+.chz-btn-danger:not(:disabled):hover {
+    background: rgba(224, 85, 85, 0.25);
+    border-color: var(--chz-error-fg);
+}
+
 .chz-btn-inline {
     padding: 2px 8px;
     font-size: 0.78rem;

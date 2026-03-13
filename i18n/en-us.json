@@ -11,6 +11,7 @@
     "chapterize.ingester_no_match": "No matching section found in Draft Bio.",
     "chapterize.ingester_revert": "Revert to AI",
     "chapterize.ingester_apply": "Apply to Bio",
+    "chapterize.ingester_reject": "Reject Suggestion",
 
     "chapterize.situation_title": "Situation Workshop",
     "chapterize.situation_summary": "Situation Summary",
@@ -23,6 +24,7 @@
     "chapterize.keys_label": "Keys (comma-separated)",
     "chapterize.suggested_content": "Suggested content",
     "chapterize.apply_entry": "Apply Entry",
+    "chapterize.lb_reject_entry": "Reject Entry",
     "chapterize.apply_all": "Apply All",
 
     "chapterize.review_title": "Review & Commit",

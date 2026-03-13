@@ -783,6 +783,8 @@ const MODAL_HTML = `
         <div class="chz-buttons">
           <button id="chz-ingester-revert" class="chz-btn chz-btn-secondary"
                   data-i18n="chapterize.ingester_revert">Revert to AI</button>
+          <button id="chz-ingester-reject" class="chz-btn chz-btn-danger"
+                  data-i18n="chapterize.ingester_reject">Reject Suggestion</button>
           <button id="chz-ingester-apply" class="chz-btn chz-btn-primary"
                   data-i18n="chapterize.ingester_apply">Apply to Bio</button>
         </div>
@@ -852,7 +854,8 @@ const MODAL_HTML = `
         <div id="lbchz-error-ingester" class="chz-error-banner chz-hidden"></div>
 
         <div class="chz-buttons">
-          <button id="lbchz-apply-one" class="chz-btn chz-btn-primary"   data-i18n="chapterize.apply_entry">Apply Entry</button>
+          <button id="lbchz-reject-one" class="chz-btn chz-btn-danger" data-i18n="chapterize.lb_reject_entry">Reject Entry</button>
+          <button id="lbchz-apply-one" class="chz-btn chz-btn-primary" data-i18n="chapterize.apply_entry">Apply Entry</button>
           <button id="lbchz-apply-all" class="chz-btn chz-btn-secondary" data-i18n="chapterize.apply_all">Apply All</button>
         </div>
       </div>
@@ -901,6 +904,7 @@ function injectModal() {
     $('#chz-ingester-select').on('change',  onIngesterSectionChange);
     $('#chz-ingester-editor').on('input',   onIngesterEditorInput);
     $('#chz-ingester-revert').on('click',   onIngesterRevertClick);
+    $('#chz-ingester-reject').on('click',   onIngesterRejectClick);
     $('#chz-ingester-apply').on('click',    onIngesterApplyClick);
     // Workshop tab switching — scoped to #chz-workshop-tab-bar to avoid matching lorebook tabs
     $('#chz-modal').on('click', '#chz-workshop-tab-bar .chz-tab-btn', function () {
@@ -913,6 +917,7 @@ function injectModal() {
     // Step 3 — Lorebook Workshop
     $('#lbchz-regen').on('click',              onLbRegenClick);
     $('#lbchz-suggestion-select').on('change', onLbSuggestionSelectChange);
+    $('#lbchz-reject-one').on('click',         onLbRejectEntry);
     $('#lbchz-apply-one').on('click',          onLbApplyEntry);
     $('#lbchz-apply-all').on('click',          onLbApplyAll);
     // Lorebook tab switching — scoped to #lbchz-tab-bar
@@ -1106,10 +1111,12 @@ function reparseSuggestions() {
             return false;
         });
 
-        if (oldMatch && oldMatch._applied) {
+        if (oldMatch && (oldMatch._applied || oldMatch._rejected)) {
             if (oldMatch.content.trimEnd() === newS.content.trimEnd()) {
-                newS._applied = true;
-            } else {
+                newS._applied = oldMatch._applied;
+                newS._rejected = oldMatch._rejected;
+            } else if (oldMatch._applied) {
+                // Only warn if they applied it and it changed. Ignored rejections don't matter.
                 changedHeaders.push(newS.header);
             }
         }
@@ -1173,7 +1180,8 @@ function populateIngesterDropdown() {
         headerSeen[key] = (headerSeen[key] || 0) + 1;
         const suffix = headerTotals[key] > 1 ? ` (${headerSeen[key]})` : '';
         const base   = `${s.header}${suffix}`;
-        const label  = s._applied ? `\u2713 ${base}` : base;
+        const labelPrefix = s._applied ? '\u2713 ' : (s._rejected ? '\u2717 ' : '');
+        const label = labelPrefix + base;
         $sel.append(`<option value="${i}">${escapeHtml(label)}</option>`);
     });
     $('#chz-ingester-apply').prop('disabled', false);
@@ -1320,10 +1328,11 @@ function onIngesterApplyClick() {
 
     // Mark as applied in dropdown and on the suggestion object
     _cardSuggestions[idx]._applied = true;
+    _cardSuggestions[idx]._rejected = false;
     const $opt = $(`#chz-ingester-select option[value="${idx}"]`);
-    if (!$opt.text().startsWith('\u2713')) {
-        $opt.text('\u2713 ' + $opt.text());
-    }
+    // Strip existing check or cross, then add check
+    const baseText = $opt.text().replace(/^[\u2713\u2717]\s*/, '');
+    $opt.text('\u2713 ' + baseText);
 
     // Refresh the diff pane to show the applied content as the new base
     renderIngesterDetail(_cardSuggestions[idx]);
@@ -1369,6 +1378,21 @@ function onRevertBioClick() {
     $('#chz-card-text').val(_originalDescription);
 }
 
+function onIngesterRejectClick() {
+    const idx = parseInt($('#chz-ingester-select').val(), 10);
+    if (isNaN(idx) || !_cardSuggestions[idx]) return;
+
+    _cardSuggestions[idx]._rejected = true;
+    _cardSuggestions[idx]._applied = false;
+
+    // Strip existing check or cross, then add cross
+    const $opt = $(`#chz-ingester-select option[value="${idx}"]`);
+    const baseText = $opt.text().replace(/^[\u2713\u2717]\s*/, '');
+    $opt.text('\u2717 ' + baseText);
+
+    updatePendingWarning();
+}
+
 // ─── Section Loading State ────────────────────────────────────────────────────
 
 function setSuggestionsLoading(isLoading) {
@@ -1399,7 +1423,7 @@ function updateConfirmState() {
 }
 
 function updatePendingWarning() {
-    const hasPending = _cardSuggestions.length > 0 && _cardSuggestions.some(s => !s._applied);
+    const hasPending = _cardSuggestions.length > 0 && _cardSuggestions.some(s => !s._applied && !s._rejected);
     $('#chz-pending-warning').toggleClass('chz-hidden', !hasPending);
 }
 
@@ -1613,6 +1637,16 @@ function lbApplySuggestion({ type, name, keys, content }) {
     // No server write — _draftLorebook is committed in bulk on Finalize
 }
 
+function onLbRejectEntry() {
+    const idx = parseInt($('#lbchz-suggestion-select').val(), 10);
+    if (isNaN(idx)) return;
+
+    // Visually mark the dropdown option as rejected
+    const $opt = $('#lbchz-suggestion-select option:selected');
+    let baseText = $opt.text().replace(/^(\u2713 staged: |\u2717 rejected: )/, '');
+    $opt.text('\u2717 rejected: ' + baseText);
+}
+
 function onLbApplyEntry() {
     const suggestions = parseLbSuggestions($('#lbchz-freeform').val());
     const idx = parseInt($('#lbchz-suggestion-select').val(), 10);
@@ -1632,9 +1666,8 @@ function onLbApplyEntry() {
 
     // Mark entry as staged in the dropdown
     const $opt = $('#lbchz-suggestion-select option:selected');
-    if (!$opt.text().startsWith('\u2713')) {
-        $opt.text('\u2713 staged: ' + $opt.text());
-    }
+    let baseText = $opt.text().replace(/^(\u2713 staged: |\u2717 rejected: )/, '');
+    $opt.text('\u2713 staged: ' + baseText);
     // Refresh current-content pane to show the newly staged value
     renderLbIngesterDetail(suggestions[idx]);
 }
@@ -1653,7 +1686,9 @@ function onLbApplyAll() {
     toastr.success(`Staged ${suggestions.length} lorebook suggestion${suggestions.length !== 1 ? 's' : ''} — will be saved on Finalize.`);
     $('#lbchz-suggestion-select option').each(function () {
         if (!$(this).text().startsWith('\u2713')) {
-            $(this).text('\u2713 staged: ' + $(this).text());
+            // Strip any existing "rejected" prefix before adding the "staged" prefix
+            let baseText = $(this).text().replace(/^\u2717 rejected:\s*/, '');
+            $(this).text('\u2713 staged: ' + baseText);
         }
     });
 }
