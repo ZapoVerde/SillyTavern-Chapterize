@@ -1,7 +1,6 @@
 {
-    "chapterize.finalize_title": "Finalize Character & Situation",
     "chapterize.character_workshop": "Character Workshop",
-    "chapterize.regen_warning": "Draft modified since last generation — suggestions may be out of sync.",
+    "chapterize.pending_warning": "Changes pending — some suggestions not yet applied.",
     "chapterize.tab_bio": "Draft Bio",
     "chapterize.tab_raw": "AI Raw",
     "chapterize.tab_ingester": "Ingester",
@@ -12,13 +11,10 @@
     "chapterize.ingester_no_match": "No matching section found in Draft Bio.",
     "chapterize.ingester_revert": "Revert to AI",
     "chapterize.ingester_apply": "Apply to Bio",
-    "chapterize.apply_entry": "Apply Entry",
+
+    "chapterize.situation_title": "Situation Workshop",
     "chapterize.situation_summary": "Situation Summary",
     "chapterize.turns_label": "Turns to carry into new chapter",
-    "chapterize.finalize": "Finalize",
-    "chapterize.update_lorebook": "Update Lorebook",
-    "chapterize.cancel": "Cancel",
-    "chapterize.receipts_title": "Commit Receipts",
 
     "chapterize.lorebook_title": "Lorebook",
     "chapterize.tab_freeform": "Freeform",
@@ -26,8 +22,16 @@
     "chapterize.current_entry_content": "Current entry content (read-only)",
     "chapterize.keys_label": "Keys (comma-separated)",
     "chapterize.suggested_content": "Suggested content",
+    "chapterize.apply_entry": "Apply Entry",
     "chapterize.apply_all": "Apply All",
-    "chapterize.close": "Close",
+
+    "chapterize.review_title": "Review & Commit",
+    "chapterize.receipts_title": "Commit Receipts",
+
+    "chapterize.cancel": "Cancel",
+    "chapterize.back": "< Back",
+    "chapterize.next": "Next >",
+    "chapterize.finalize": "Finalize",
 
     "chapterize.settings_title": "Chapterize",
     "chapterize.settings_turns_label": "Turns to carry over (default)",
