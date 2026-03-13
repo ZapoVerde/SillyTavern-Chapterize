@@ -31,7 +31,7 @@
  *   assertions:
  *     purity: mutates # Modifies module-level session state on each invocation.
  *     state_ownership: [_transcript, _originalDescription, _cardSuggestions,
- *       _draftModifiedSinceRegen, _chapterName, _cloneAvatarUrl, _finalizeSteps,
+ *       _chapterName, _cloneAvatarUrl, _finalizeSteps,
  *       _suggestionsGenId, _situationGenId, _lorebookGenId,
  *       _lorebookName, _lorebookData, _draftLorebook, _lorebookLoading,
  *       extension_settings.chapterize]
@@ -58,20 +58,20 @@ TASK:
 1. Examine the CHARACTER DESCRIPTION for specific facts (age, health, relations, location).
 2. Examine the transcript for changes to those facts.
 3. Update the existing prose ONLY where facts have changed or a major status shift (like an injury or new possession) has occurred.
-4. Maintain the exact existing structure, headers (━━━━━━━━), and formatting.
+4. Maintain the exact existing structure and header names.
 
 CONSTRAINTS:
-- DO NOT invent new categories (e.g., "Update Status").
+- DO NOT invent new categories.
 - DO NOT rewrite paragraphs that are still factually accurate.
 - People change slowly; keep edits minimal and integrated into the current prose style.
-- If no changes are needed, return the description as-is.
+- If no changes are needed, return nothing.
 
 ### OUTPUT FORMAT
-Identify specific sections of the description that need updating or new blocks that should be added. Format your response as a series of snippets:
+Format your response as standard character description sections. Each header must be on its own line, followed by the updated content on the next line. Use the exact same header names as in the current description. Provide only the updated sections; do not include a preamble or conversational filler.
 
-**### [Section Name/Header]**
-[The replacement text or new text section]
-*Reason: [One sentence explaining the change and where it goes]*
+Example:
+Health:
+Wounded in the left shoulder, moving carefully.
 
 CHARACTER DESCRIPTION:
 {{original_description}}
@@ -83,7 +83,7 @@ SESSION TRANSCRIPT:
 `;
 
 const DEFAULT_CARD_PROMPT_AFT = `
-Generate 2–4 specific prose snippets based on the recent events. Each snippet should be written as a "drop-in" replacement or a new addition to the character's description. Maintain the established tone and formatting exactly. Do not provide meta-advice; provide the actual text to be used.
+Generate 2–4 specific prose sections based on the recent events, written as drop-in replacements or new additions to the character's description. Each section header must be on its own line, followed by the content on the next line. Use the exact same header names as in the description. Maintain the established tone and formatting exactly. Do not provide meta-advice; provide only the actual text sections.
 `;
 
 const DEFAULT_SITUATION_PROMPT = `
@@ -177,7 +177,6 @@ let _lorebookGenId           = 0;
 
 // Character Workshop state
 let _cardSuggestions         = [];      // parsed suggestion objects from last card AI call
-let _draftModifiedSinceRegen = false;   // true if Draft Bio was manually edited since last regen
 
 // Finalize commit state — set during card save step, persisted for retries
 let _chapterName             = '';      // derived chat file name (e.g. "ch2")
@@ -564,11 +563,8 @@ function parseLbSuggestions(rawText) {
             : afterKeys
         ).trim();
 
-        const reasonMatch = afterKeys.match(/^\*Reason:\s*(.+?)\*?\s*$/im);
-        const reason = reasonMatch ? reasonMatch[1].trim() : '';
-
         if (!content) continue;
-        suggestions.push({ type, name, keys, content, reason });
+        suggestions.push({ type, name, keys, content });
     }
     return suggestions;
 }
@@ -602,7 +598,7 @@ function nextLorebookUid() {
  * @core-principles
  *   1. Must remain synchronous and deterministic.
  *   2. Must not interact with the DOM or global session state.
- * @api-declaration parseDescriptionSections, applyDescriptionSection, parseCardSuggestions
+ * @api-declaration parseDescriptionSections, applyDescriptionSection
  * @contract
  *   assertions:
  *     purity: pure
@@ -705,35 +701,6 @@ function applyDescriptionSection(text, startLine, endLine, newContent) {
     ].join('\n');
 }
 
-/**
- * Parses the raw AI card-audit text into an array of suggestion objects.
- * The card prompt produces blocks formatted as:
- *   **### [Section Name/Header]**
- *   [replacement content]
- *   *Reason: [one sentence]*
- * Returns [] if no valid blocks are found.
- * Pure function — no DOM or module dependencies.
- */
-function parseCardSuggestions(rawText) {
-    const suggestions = [];
-    // Split on **### [Header]** block openers, preserving the delimiter
-    const parts = rawText.split(/(?=\*\*#{1,3}\s*\[)/);
-    for (const part of parts) {
-        const headerMatch = part.match(/^\*\*#{1,3}\s*\[(.+?)\]\*{0,2}\s*[\r\n]/);
-        if (!headerMatch) continue;
-        const header = headerMatch[1].trim();
-        const rest   = part.slice(headerMatch[0].length);
-
-        const reasonIdx = rest.search(/^\*Reason:/im);
-        const content   = (reasonIdx !== -1 ? rest.slice(0, reasonIdx) : rest).trim();
-        const reasonMatch = rest.match(/^\*Reason:\s*(.+?)\*?\s*$/im);
-        const reason    = reasonMatch ? reasonMatch[1].trim() : '';
-
-        if (content) suggestions.push({ header, content, reason });
-    }
-    return suggestions;
-}
-
 // ─── Modal HTML ───────────────────────────────────────────────────────────────
 
 const MODAL_HTML = `
@@ -749,8 +716,8 @@ const MODAL_HTML = `
         <span id="chz-spin-suggestions" class="chz-section-spin fa-solid fa-spinner fa-spin chz-hidden"></span>
         <button id="chz-regen-suggestions" class="chz-btn chz-btn-secondary chz-btn-sm">&#x21bb;</button>
       </div>
-      <div id="chz-regen-warning" class="chz-warn chz-hidden"
-           data-i18n="chapterize.regen_warning">Draft modified since last generation — suggestions may be out of sync.</div>
+      <div id="chz-pending-warning" class="chz-warn chz-warn-amber chz-hidden"
+           data-i18n="chapterize.pending_warning">Changes pending — some suggestions not yet applied.</div>
 
       <div class="chz-tab-bar" id="chz-workshop-tab-bar">
         <button class="chz-tab-btn chz-tab-active" data-tab="bio"
@@ -770,7 +737,9 @@ const MODAL_HTML = `
       </div>
 
       <div id="chz-tab-raw" class="chz-tab-panel chz-hidden">
-        <div id="chz-suggestions-raw" class="chz-suggestions-box"></div>
+        <span class="chz-info-icon" title="Any line with 1–3 words is treated as a section header. If a line is incorrectly detected as a header, add a word to make it 4+ words.">&#9432;</span>
+        <textarea id="chz-suggestions-raw" class="chz-textarea chz-textarea-tall" spellcheck="false"></textarea>
+        <div id="chz-raw-error" class="chz-error-banner chz-hidden"></div>
       </div>
 
       <div id="chz-tab-ingester" class="chz-tab-panel chz-hidden">
@@ -906,13 +875,6 @@ function injectModal() {
         onWorkshopTabSwitch($(this).data('tab'));
     });
 
-    // Dirty draft tracking — programmatic .val() changes do not fire 'input'
-    $('#chz-modal').on('input', '#chz-card-text', () => {
-        _draftModifiedSinceRegen = true;
-        if (!_suggestionsLoading && _cardSuggestions.length) {
-            $('#chz-regen-warning').removeClass('chz-hidden');
-        }
-    });
 }
 
 function showModal() {
@@ -930,7 +892,6 @@ function closeModal() {
     _originalDescription     = '';
     _priorSituation          = '';
     _cardSuggestions         = [];
-    _draftModifiedSinceRegen = false;
     _chapterName             = '';
     _cloneAvatarUrl          = '';
     _suggestionsLoading      = false;
@@ -950,7 +911,6 @@ function closeModal() {
 function showStep2() {
     // Reset character workshop state for the new session
     _cardSuggestions         = [];
-    _draftModifiedSinceRegen = false;
     _chapterName             = '';
     _cloneAvatarUrl          = '';
 
@@ -958,8 +918,9 @@ function showStep2() {
     $('#chz-card-text').val(_originalDescription);
     $('#chz-turns').val(getSettings().turnsN);
     $('#chz-error-2').addClass('chz-hidden').text('');
-    $('#chz-regen-warning').addClass('chz-hidden');
-    $('#chz-suggestions-raw').empty();
+    $('#chz-pending-warning').addClass('chz-hidden');
+    $('#chz-suggestions-raw').val('');
+    $('#chz-raw-error').addClass('chz-hidden').text('');
     $('#chz-receipts').addClass('chz-hidden');
     $('#chz-receipts-content').empty();
     $('#chz-cancel-2').text('Cancel');
@@ -979,12 +940,12 @@ function showStep2() {
  * @description Manages the tabbed Drafting/Ingester interface for character bios.
  * @core-principles
  *   1. The Draft Bio textarea is the authoritative source of truth.
- *   2. The Ingester must re-parse the bio on every tab-switch to capture manual edits.
- * @api-declaration onWorkshopTabSwitch, populateIngesterDropdown, renderIngesterDetail
+ *   2. The Ingester re-parses AI Raw on every tab-switch unless generation is in progress.
+ * @api-declaration onWorkshopTabSwitch, reparseSuggestions, populateIngesterDropdown, renderIngesterDetail
  * @contract
  *   assertions:
  *     purity: impure (DOM)
- *     state_ownership: [_cardSuggestions, _draftModifiedSinceRegen]
+ *     state_ownership: [_cardSuggestions]
  *     external_io: none
  */
 
@@ -996,14 +957,92 @@ function onWorkshopTabSwitch(tabName) {
     $('#chz-tab-raw').toggleClass('chz-hidden',      tabName !== 'raw');
     $('#chz-tab-ingester').toggleClass('chz-hidden', tabName !== 'ingester');
 
-    // Re-parse bio whenever switching to the Ingester tab
+    // Re-parse AI Raw whenever switching to the Ingester tab (skip during generation
+    // so an empty textarea does not clobber the in-flight _cardSuggestions array)
     if (tabName === 'ingester') {
+        if (!_suggestionsLoading) {
+            reparseSuggestions();
+        }
         populateIngesterDropdown();
         const idx = parseInt($('#chz-ingester-select').val(), 10);
         if (!isNaN(idx) && _cardSuggestions[idx]) {
             renderIngesterDetail(_cardSuggestions[idx]);
         }
     }
+}
+
+/**
+ * Re-parses the current AI Raw textarea and updates _cardSuggestions.
+ * Carries forward _applied flags where header, occurrence, and content match
+ * (using trimEnd() so blank separator lines do not clear applied state).
+ * Emits a toastr warning listing any applied sections whose content changed.
+ */
+function reparseSuggestions() {
+    const text  = $('#chz-suggestions-raw').val();
+    const lines = text.split('\n');
+    const sections = parseDescriptionSections(text);
+
+    const newSuggestions = sections.map(s => ({
+        header:   s.header,
+        content:  lines.slice(s.startLine, s.endLine + 1).join('\n'),
+        _applied: false,
+    }));
+
+    const changedHeaders = [];
+
+    // Pass 1: carry forward _applied by header + nth occurrence.
+    // trimEnd() so added blank separator lines don't clear applied state.
+    const newHeaderSeen = {};
+    for (const newS of newSuggestions) {
+        const key = newS.header.toLowerCase();
+        newHeaderSeen[key] = (newHeaderSeen[key] || 0) + 1;
+        const occurrence = newHeaderSeen[key];
+
+        let oldOccurrenceCount = 0;
+        const oldMatch = _cardSuggestions.find(oldS => {
+            if (oldS.header.toLowerCase() === key) {
+                oldOccurrenceCount++;
+                return oldOccurrenceCount === occurrence;
+            }
+            return false;
+        });
+
+        if (oldMatch && oldMatch._applied) {
+            if (oldMatch.content.trimEnd() === newS.content.trimEnd()) {
+                newS._applied = true;
+            } else {
+                changedHeaders.push(newS.header);
+            }
+        }
+    }
+
+    // Pass 2: warn about applied entries that were deleted entirely from the new parse.
+    const oldHeaderSeen = {};
+    for (const oldS of _cardSuggestions) {
+        if (!oldS._applied) continue;
+        const key = oldS.header.toLowerCase();
+        oldHeaderSeen[key] = (oldHeaderSeen[key] || 0) + 1;
+        const occurrence = oldHeaderSeen[key];
+
+        let newOccurrenceCount = 0;
+        const stillPresent = newSuggestions.some(newS => {
+            if (newS.header.toLowerCase() === key) {
+                newOccurrenceCount++;
+                return newOccurrenceCount === occurrence;
+            }
+            return false;
+        });
+
+        if (!stillPresent) {
+            changedHeaders.push(oldS.header);
+        }
+    }
+
+    if (changedHeaders.length > 0) {
+        toastr.warning(`Applied sections no longer match generated output: ${changedHeaders.join(', ')}`);
+    }
+    _cardSuggestions = newSuggestions;
+    updatePendingWarning();
 }
 
 /**
@@ -1116,13 +1155,11 @@ function onIngesterApplyClick() {
 
     // Refresh the Current Draft pane to show the applied content
     renderIngesterDetail(_cardSuggestions[idx]);
+    updatePendingWarning();
 }
 
 function onRevertBioClick() {
     $('#chz-card-text').val(_originalDescription);
-    // Revert clears the dirty flag — we're back to the original
-    _draftModifiedSinceRegen = false;
-    $('#chz-regen-warning').addClass('chz-hidden');
 }
 
 // ─── Section Loading State ────────────────────────────────────────────────────
@@ -1131,9 +1168,12 @@ function setSuggestionsLoading(isLoading) {
     _suggestionsLoading = isLoading;
     $('#chz-spin-suggestions').toggleClass('chz-hidden', !isLoading);
     $('#chz-regen-suggestions').prop('disabled', isLoading);
+    $('#chz-suggestions-raw').prop('disabled', isLoading);
     if (isLoading) {
-        $('#chz-suggestions-raw').empty();
-        _cardSuggestions = [];
+        $('#chz-suggestions-raw').val('');
+        $('#chz-raw-error').addClass('chz-hidden').text('');
+        // _cardSuggestions intentionally kept alive during regen so reparseSuggestions
+        // can carry _applied flags forward when the new result lands.
     }
     updateConfirmState();
 }
@@ -1151,10 +1191,18 @@ function updateConfirmState() {
     $('#chz-confirm').prop('disabled', _suggestionsLoading || _situationLoading);
 }
 
+function updatePendingWarning() {
+    const hasPending = _cardSuggestions.length > 0 && _cardSuggestions.some(s => !s._applied);
+    $('#chz-pending-warning').toggleClass('chz-hidden', !hasPending);
+}
+
 function populateSuggestions(text) {
     setSuggestionsLoading(false);
-    _cardSuggestions = parseCardSuggestions(text);
-    $('#chz-suggestions-raw').html('<pre>' + escapeHtml(text) + '</pre>');
+    // On initial load _cardSuggestions is empty (cleared by showStep2).
+    // On regen, _cardSuggestions holds the previous result; reparseSuggestions will carry _applied flags forward.
+    $('#chz-raw-error').addClass('chz-hidden').text('');
+    $('#chz-suggestions-raw').val(text);
+    reparseSuggestions();
     // If the Ingester tab is currently open, refresh its dropdown
     if (!$('#chz-tab-ingester').hasClass('chz-hidden')) {
         populateIngesterDropdown();
@@ -1168,7 +1216,7 @@ function populateSituation(text) {
 
 function showSuggestionsError(message) {
     setSuggestionsLoading(false);
-    $('#chz-suggestions-raw').html(`<span class="chz-error-inline">${escapeHtml(message)}</span>`);
+    $('#chz-raw-error').text(message).removeClass('chz-hidden');
 }
 
 function showSituationError(message) {
@@ -1494,8 +1542,6 @@ async function onChapterizeClick() {
 }
 
 function onRegenSuggestionsClick() {
-    _draftModifiedSinceRegen = false;
-    $('#chz-regen-warning').addClass('chz-hidden');
     setSuggestionsLoading(true);
     const sugId   = ++_suggestionsGenId;
     const bioText = $('#chz-card-text').val();
