@@ -4,52 +4,55 @@
 
 ## How it Works
 
-When you trigger Chapterize the extension determines whether the active character is a **base character** (first chapterize) or an **existing chapter card** already carrying a `(ChX)` suffix (subsequent chapterizes), then opens the Chapterize Workshop:
+When you trigger Chapterize the extension determines whether the active character is a **base character** (first chapterize) or an **existing chapter card** already carrying a `(ChX)` suffix (subsequent chapterizes), then opens a four-step wizard:
 
-### 1. Parallel AI Analysis
+### Step 1 — Character Workshop
 
-Two LLM calls fire simultaneously as soon as the modal opens:
+Two LLM calls fire simultaneously as soon as the modal opens: the **Card Audit** and the **Situation Summary** (see Step 2). A third call fetches and analyses the lorebook in parallel (see Step 3).
 
-- **Card Audit:** Analyses the character description against the session transcript and generates prose snippets — drop-in replacements for sections whose facts have changed.
-- **Situation Summary:** Creates a present-tense narrative brief (200–500 words) covering where the story stands, including unresolved threads and character realizations.
-
-### 2. Character Workshop
-
-A three-tab editor lets you stage changes to the character description before anything is saved:
+The Character Workshop is a three-tab editor for staging changes to the character description:
 
 - **Draft Bio** — the full description in an editable textarea. Edit directly, or use the Ingester to apply AI suggestions section by section. A "Revert to Original" button resets it to the unmodified card text.
-- **AI Raw** — the unprocessed card-audit output for reference. A regenerate button re-runs the call against the current Draft Bio, and a warning banner appears if the draft has been manually edited since the last generation.
-- **Ingester** — a side-by-side panel that parses the AI output into individual section suggestions. Each suggestion shows the matching current draft text alongside the AI's proposed replacement. Click **Apply** to patch the Draft Bio in-place.
+- **AI Raw** — the unprocessed card-audit output. A regenerate button re-runs the call against the current Draft Bio. A warning banner appears if any suggestions remain unapplied or unrejected.
+- **Ingester** — a section-aware diff panel. A dropdown lists every parsed suggestion; each entry is prefixed with ✓ (applied), ✗ (rejected), or nothing (unresolved). The diff pane shows a word-level comparison between the matching bio section and the current editor content. Controls:
+  - **➡ (Next)** — jumps to the next unresolved suggestion.
+  - **Revert to AI** — resets the editor to the original AI-generated text for this suggestion.
+  - **Revert to Bio** — resets the editor to whatever the matching bio section currently contains.
+  - **Reject** — marks the suggestion dismissed without applying it.
+  - **Apply** — patches the Draft Bio in-place with the editor content and marks the suggestion ✓.
 
-### 3. Situation Summary
+### Step 2 — Situation Workshop
 
-A separate editable textarea for the situation output, with its own regenerate button. This text is appended to the character description behind a fixed separator so it feeds future sessions as `PRIOR CHAPTER SUMMARY` without cluttering the prose you edit.
+An editable textarea receives the **Situation Summary**: a 200–500 word present-tense narrative brief covering where the story stands, unresolved threads, and character realizations. It has its own regenerate button. The **Turns** input (1–10, default 4) controls how many turn pairs are seeded into the new chapter chat.
 
-### 4. Lorebook Integration
+### Step 3 — Lorebook Workshop
 
-The **Update Lorebook** button opens a separate modal at any time without blocking the main flow. It fires a third LLM call, then lets you stage entry updates using the same Freeform / Ingester tab pattern. **All lorebook changes are staged in memory until Finalize** — Apply Entry and Apply All do not write to the server.
+The lorebook call fires in parallel with the bio and situation calls at modal open. Step 3 exposes the result in two tabs:
 
-### 5. Finalize & Commit
+- **Freeform** — the raw AI output, fully editable before parsing.
+- **Ingester** — parses the freeform text into structured `UPDATE` and `NEW` blocks. Each suggestion is enriched with a UID anchor into `_draftLorebook` and an AI snapshot for revert operations. Controls mirror the character ingester:
+  - **➡ (Next)** — jumps to the next unresolved suggestion.
+  - **Revert to AI** — resets the three editor fields (Name, Keys, Content) to the original AI text.
+  - **Revert to Draft** — resets the editor fields to whatever is currently staged in `_draftLorebook` for the linked entry (disabled for unapplied NEW entries).
+  - **Reject** / **Apply** — per-suggestion staging (no server write).
+  - **Apply All Unresolved** — applies every unreviewed suggestion after a confirmation dialog.
+
+**All lorebook changes are staged in memory until Finalize.** Staged changes persist across Lorebook tab open/close within the same Chapterize session.
+
+### Step 4 — Review & Commit
+
+A pre-flight summary shows the target character name and operation mode (clone or edit-in-place), the number of messages being carried into the new chat, and how many lorebook entries are staged for update or creation. A pending-review warning is shown if any lorebook suggestions remain unresolved.
 
 Clicking **Finalize** runs four steps in sequence, each tracked in a Commit Receipts panel:
 
 1. **Card Save** — creates a clone card (`CharName (Ch1)`) on the first chapterize, or edits the existing chapter card in-place and bumps its name (`(ChX)` → `(ChX+1)`) on subsequent ones.
-2. **Lorebook Save** — bulk-writes any staged lorebook changes to the server (skipped if the lorebook modal was never opened this session).
+2. **Lorebook Save** — bulk-writes all staged lorebook changes to the server (skipped if no changes were staged).
 3. **Chat Save** — creates a new chat file (`ch1`, `ch2`, …) seeded with the last N turns for tone continuity.
 4. **Navigate** — switches you to the new chat automatically.
 
 If any step fails, the receipts panel shows which step errored. Steps that already succeeded are not re-run on retry — clicking Finalize again resumes from the first incomplete step.
 
 **Cancel before any commit** wipes all staged state. **Cancel after a partial commit** relabels to "Close" and keeps the receipts visible so you can see what was saved and retry if needed.
-
-## Lorebook Staging in Detail
-
-The lorebook modal uses two tabs:
-
-- **Freeform** — the raw AI output, fully editable before parsing.
-- **Ingester** — parses the freeform text into structured `UPDATE` and `NEW` blocks. For each suggestion you can edit the keys and content, preview the current entry (for UPDATE suggestions), and apply individually or all at once. Applied suggestions are marked with ✓ in the dropdown.
-
-Staged changes persist across lorebook modal open/close within the same Chapterize session, so you can close and reopen the lorebook modal without losing your work.
 
 ## Model Recommendations 🧠
 
@@ -73,7 +76,7 @@ The quality of chapter transitions depends heavily on the model used. Because th
 2. Go to `public/extensions`.
 3. Clone this repository:
    ```
-   git clone https://github.com/YourUsername/chapterize.git
+   git clone https://github.com/ZapoVerde/SillyTavern-Chapterize.git
    ```
 4. Refresh SillyTavern in your browser.
 
@@ -81,13 +84,13 @@ The quality of chapter transitions depends heavily on the model used. Because th
 
 1. **Open a Chat:** Open a standard (non-group) character chat.
 2. **Click Chapterize:** Find the **Chapterize** button in the Extensions menu (or use `/chapterize`).
-3. **Review in the Character Workshop:**
+3. **Step 1 — Character Workshop:**
    - Read the raw AI output in the **AI Raw** tab.
-   - Switch to **Ingester** to apply individual suggestions to the Draft Bio.
-   - Or edit the **Draft Bio** directly and use Revert if needed.
-   - Review and tweak the **Situation Summary**.
-   - Optionally open **Update Lorebook** to stage world-info changes.
-4. **Finalize:** The extension saves your character, commits any lorebook changes, creates a new chapter chat, and switches you to it automatically.
+   - Switch to **Ingester** to apply, reject, or edit individual suggestions with word-level diffs.
+   - Or edit the **Draft Bio** directly.
+4. **Step 2 — Situation Workshop:** Review and tweak the Situation Summary and set how many turns to carry.
+5. **Step 3 — Lorebook Workshop:** Review AI suggestions in Freeform or Ingester tabs; apply, reject, or edit entries staged to `_draftLorebook`.
+6. **Step 4 — Review & Commit:** Confirm the pre-flight summary, then click **Finalize**.
 
 ## Configuration
 
@@ -103,7 +106,8 @@ In the SillyTavern Extensions settings panel you can configure:
 - **Nothing is committed until Finalize.** All edits — to the description, to lorebook entries — are staged in memory and written in a single sequential commit sequence.
 - The situation summary is stored at the end of the character's description field separated by `\n\n*** Chapterize Divider — Do Not Edit ***\n\n`. SillyTavern treats the whole description field as part of the character's permanent context, so prior chapter threads always remain in the AI's active memory.
 - The original chat file is **never modified**. The new chapter chat is a separate `.jsonl` file seeded with the last N complete turn pairs from the current session.
-- The Ingester uses section-aware parsing (`parseDescriptionSections`) to match AI suggestions to bio sections by header text and occurrence order, handling duplicate headers correctly.
+- The Character Ingester uses section-aware parsing (`parseDescriptionSections`) to match AI suggestions to bio sections by header text and occurrence order, handling duplicate headers correctly. Word-level LCS diffs (`wordDiff`) power the diff pane.
+- The Lorebook Ingester uses a Virtual Document model (`toVirtualDoc`) that flattens Name, Keys, and Content into a single string for diffing. Suggestions are enriched with UID anchors (`enrichLbSuggestions`) so regen and manual edits are reconciled without losing applied/rejected state.
 - Lorebook entries use SillyTavern's standard world-info schema. A `WORLDINFO_UPDATED` event is emitted after each save so ST's editor reflects changes without a page reload.
 - Commit Receipts track step completion. A failed Finalize can be retried by clicking Finalize again — completed steps are not repeated.
 
