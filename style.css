@@ -43,6 +43,7 @@
     --chz-btn-font:           0.85rem;
     --chz-btn-primary-bg:     var(--SmartThemeBlurTintColor, #5c85d6);
     --chz-btn-primary-fg:     #ffffff;
+    --chz-btn-success-fg:     #6bbf6b;
 
     --chz-z-modal:            9999;
 }
@@ -291,6 +292,17 @@
     border-color: var(--chz-error-fg);
 }
 
+.chz-btn-success {
+    background: rgba(60, 180, 60, 0.15);
+    color: var(--chz-btn-success-fg);
+    border-color: rgba(60, 180, 60, 0.35);
+}
+
+.chz-btn-success:not(:disabled):hover {
+    background: rgba(60, 180, 60, 0.28);
+    border-color: var(--chz-btn-success-fg);
+}
+
 .chz-btn-inline {
     padding: 2px 8px;
     font-size: 0.78rem;
@@ -453,6 +465,30 @@
 
 .chz-buttons-left {
     justify-content: flex-start;
+}
+
+/* ─── Split button row (left group / right group) ────────────────────────── */
+
+.chz-buttons-split {
+    justify-content: space-between;
+}
+
+.chz-btn-group {
+    display: flex;
+    gap: var(--chz-gap-sm);
+}
+
+/* ─── Select + adjacent nav button ──────────────────────────────────────── */
+
+.chz-select-with-nav {
+    display: flex;
+    gap: var(--chz-gap-sm);
+    align-items: center;
+}
+
+.chz-select-with-nav .chz-select {
+    flex: 1;
+    min-width: 0;
 }
 
 /* ─── Commit Receipts Panel ──────────────────────────────────────────────── */
