@@ -1,24 +1,25 @@
 /**
  * @file data/default-user/extensions/chapterize/index.js
- * @stamp {"utc":"2026-03-12T00:00:00.000Z"}
+ * @stamp {"utc":"2026-03-13T00:00:00.000Z"}
  * @architectural-role Feature Entry Point
  * @description
- * SillyTavern extension that closes a roleplay chapter. On button click, fires
- * two parallel AI calls — a card audit (bullet-point suggestions) and a
- * situation summary — both rendered inline with independent spinners in a single
- * review step. The user edits the character description prose directly, guided
- * by the suggestions. On Confirm, writes the combined description + situation
- * block to the character card and creates a new chapter chat seeded with the
- * last N turns. The original chat file is never modified.
- *
- * A separate [Update Lorebook] button opens a lorebook modal that fires a
- * third AI call, presenting lorebook suggestions in a freeform tab (editable
- * raw text) and an ingester tab (structured apply UI). Lorebook writes are
- * per-entry and immediate; they do not gate the Confirm flow.
+ * SillyTavern extension that closes a roleplay chapter using a Draft/Commit
+ * architecture. On button click, opens the Chapterize Workshop modal which
+ * fires two parallel AI calls — a card audit (section snippets) and a situation
+ * summary. The workshop provides a three-tab Character Workshop (Draft Bio,
+ * AI Raw, Ingester) and a matching Lorebook Workshop. All edits are staged in
+ * memory. On Finalize, changes are committed sequentially:
+ *   1. Character card (create clone or edit-in-place)
+ *   2. Lorebook (deferred bulk write of _draftLorebook)
+ *   3. New chapter chat (seeded with last N turns)
+ * The Commit Receipts panel tracks step completion for safe retries. Cancel
+ * before any commit wipes all state; Cancel after a partial commit relabels to
+ * "Close" and keeps receipts visible.
  * @core-principles
  * 1. OWNS the full chapterize workflow from button click through new chat open.
- * 2. MUST NOT commit any server write until the user clicks Confirm (except
- *    lorebook Apply, which is an explicit per-entry user action).
+ * 2. MUST NOT commit any server write until the user clicks Finalize.
+ *    Lorebook Apply stages changes to _draftLorebook only; the bulk server write
+ *    happens as step 2 of the Finalize sequence.
  * 3. DELEGATES all disk persistence to ST server endpoints via fetch; IS NOT
  *    responsible for direct filesystem access.
  * @api-declaration
@@ -29,8 +30,10 @@
  * @contract
  *   assertions:
  *     purity: mutates # Modifies module-level session state on each invocation.
- *     state_ownership: [_transcript, _originalDescription, _suggestionsLoading,
- *       _situationLoading, _lorebookName, _lorebookData, _lorebookLoading,
+ *     state_ownership: [_transcript, _originalDescription, _cardSuggestions,
+ *       _draftModifiedSinceRegen, _chapterName, _cloneAvatarUrl, _finalizeSteps,
+ *       _suggestionsGenId, _situationGenId, _lorebookGenId,
+ *       _lorebookName, _lorebookData, _draftLorebook, _lorebookLoading,
  *       extension_settings.chapterize]
  *     external_io: https_apis # generateWithProfile (LLM, via generateRaw or
  *       ConnectionManagerRequestService) and ST /api/* endpoints.
@@ -158,22 +161,42 @@ const SETTINGS_DEFAULTS = Object.freeze({
 // ─── Session State ────────────────────────────────────────────────────────────
 // Cleared at the start of each chapterize invocation.
 
-let _transcript          = '';
-let _originalDescription = '';
-let _priorSituation      = '';
-let _suggestionsLoading  = false;
-let _situationLoading    = false;
-let _isChapterMode       = false;   // true when current char already has a (ChX) suffix
-let _nextChNum           = 1;       // chapter number to assign on next chapterize
-let _cloneName           = '';      // display name for the chapter card (e.g. "CharName (Ch2)")
-let _generationId        = 0;       // incremented on each new invocation; guards stale promise callbacks
+let _transcript              = '';
+let _originalDescription     = '';
+let _priorSituation          = '';
+let _suggestionsLoading      = false;
+let _situationLoading        = false;
+let _isChapterMode           = false;   // true when current char already has a (ChX) suffix
+let _nextChNum               = 1;       // chapter number to assign on next chapterize
+let _cloneName               = '';      // display name for the chapter card (e.g. "CharName (Ch2)")
+// Per-call generation IDs — incremented on each new call, checked in callbacks
+// to discard results from superseded calls. All three incremented on closeModal.
+let _suggestionsGenId        = 0;
+let _situationGenId          = 0;
+let _lorebookGenId           = 0;
+
+// Character Workshop state
+let _cardSuggestions         = [];      // parsed suggestion objects from last card AI call
+let _draftModifiedSinceRegen = false;   // true if Draft Bio was manually edited since last regen
+
+// Finalize commit state — set during card save step, persisted for retries
+let _chapterName             = '';      // derived chat file name (e.g. "ch2")
+let _cloneAvatarUrl          = '';      // clone path only: avatar URL of the created clone
+
+// Step completion flags — reset only on fresh session start, NOT between retry attempts
+const _finalizeSteps = {
+    cardSaved:     false,
+    lorebookSaved: false,
+    chatSaved:     false,
+};
 
 // ─── Lorebook Session State ───────────────────────────────────────────────────
-// Not cleared on closeModal — lorebook changes are already persisted per-entry.
-// Reset when the lorebook modal is closed or a new chapterize session begins.
+// Cleared on closeModal. _draftLorebook persists across lorebook modal open/close
+// within the same chapterize session so staged changes are not lost.
 
 let _lorebookName    = '';    // base character name used as lorebook filename
-let _lorebookData    = null;  // {entries:{}} — loaded from server, mutated on Apply
+let _lorebookData    = null;  // {entries:{}} — server copy, loaded on first open
+let _draftLorebook   = null;  // working copy — deep clone of _lorebookData; Apply mutates this only
 let _lorebookLoading = false;
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
@@ -220,9 +243,9 @@ async function generateWithProfile(prompt) {
     return generateRaw({ prompt, trimNames: false });
 }
 
-async function runSuggestionsCall() {
+async function runSuggestionsCall(bioText) {
     const fore = interpolate(getSettings().cardPrompt, {
-        original_description: _originalDescription,
+        original_description: bioText,
         transcript:           _transcript,
     });
     const aft    = getSettings().cardPromptAft?.trim();
@@ -551,12 +574,12 @@ function parseLbSuggestions(rawText) {
 }
 
 /**
- * Searches _lorebookData.entries for an entry whose comment matches `name`
+ * Searches _draftLorebook.entries for an entry whose comment matches `name`
  * case-insensitively. Returns the string uid key, or null if not found.
  */
 function matchEntryByComment(name) {
     const lower = name.toLowerCase();
-    for (const [uid, entry] of Object.entries(_lorebookData?.entries ?? {})) {
+    for (const [uid, entry] of Object.entries(_draftLorebook?.entries ?? {})) {
         if ((entry.comment ?? '').toLowerCase() === lower) return uid;
     }
     return null;
@@ -566,8 +589,149 @@ function matchEntryByComment(name) {
  * Returns the next available numeric uid for a new lorebook entry.
  */
 function nextLorebookUid() {
-    const keys = Object.keys(_lorebookData?.entries ?? {}).map(Number).filter(n => !isNaN(n));
+    const keys = Object.keys(_draftLorebook?.entries ?? {}).map(Number).filter(n => !isNaN(n));
     return keys.length ? Math.max(...keys) + 1 : 0;
+}
+
+/**
+ * @section Character Description Parser
+ * @architectural-role Domain Logic / Parser
+ * @description Normalizes raw bio text into addressable sections and maps AI snippets. 
+ *              Returns true if the line consists entirely of decorator characters
+ *              (-, *, ━, spaces) and is non-empty — i.e. a horizontal rule or separator line.
+ * @core-principles
+ *   1. Must remain synchronous and deterministic.
+ *   2. Must not interact with the DOM or global session state.
+ * @api-declaration parseDescriptionSections, applyDescriptionSection, parseCardSuggestions
+ * @contract
+ *   assertions:
+ *     purity: pure
+ *     state_ownership: []
+ *     external_io: none
+ */
+
+function isDecoratorLine(line) {
+    return line.trim().length > 0 && /^[\s\-*━]+$/.test(line);
+}
+
+/**
+ * Strips leading/trailing decorator and punctuation characters from a line to
+ * expose the core header text. Handles patterns like:
+ *   **Appearance**, ━━━ Appearance ━━━, Appearance:, --- Appearance ---
+ * Pure function — no DOM or module dependencies.
+ */
+function stripHeaderDecorators(line) {
+    return line
+        .replace(/^[\s*\-_#━]+/, '')    // leading decorator chars
+        .replace(/[\s*\-_#━:]+$/, '')   // trailing decorator/punctuation
+        .trim();
+}
+
+/**
+ * Returns true if the line should be treated as a section header.
+ * After stripping decorator characters, the remaining text must be 1–3 words.
+ * Decorator-only lines (empty after stripping) are excluded.
+ * Pure function — no DOM or module dependencies.
+ */
+function isHeaderLine(line) {
+    if (isDecoratorLine(line)) return false;
+    const core = stripHeaderDecorators(line);
+    if (!core) return false;
+    const wordCount = core.split(/\s+/).filter(Boolean).length;
+    return wordCount >= 1 && wordCount <= 3;
+}
+
+/**
+ * Parses a character description string into an ordered list of sections.
+ * Each entry: { header, index, headerLine, startLine, endLine }
+ *   header     — normalised header text (e.g. "Appearance")
+ *   index      — 1-based occurrence index for duplicate headers
+ *   headerLine — line index of the header line itself
+ *   startLine  — first line of section content (after header + optional decorator)
+ *   endLine    — last line of section content (inclusive, before next header)
+ * Pure function — no DOM or module dependencies.
+ */
+function parseDescriptionSections(text) {
+    const lines      = text.split('\n');
+    const rawHeaders = [];
+
+    for (let i = 0; i < lines.length; i++) {
+        if (isHeaderLine(lines[i])) {
+            rawHeaders.push({ lineIdx: i, header: stripHeaderDecorators(lines[i]) });
+        }
+    }
+
+    const seenCounts = {};
+    const sections   = [];
+
+    for (let i = 0; i < rawHeaders.length; i++) {
+        const { lineIdx, header } = rawHeaders[i];
+        seenCounts[header] = (seenCounts[header] || 0) + 1;
+        const index = seenCounts[header];
+
+        // Content starts after the header; skip an immediately adjacent decorator line
+        let startLine = lineIdx + 1;
+        if (startLine < lines.length && isDecoratorLine(lines[startLine])) {
+            startLine++;
+        }
+
+        // Content ends before the next raw header line
+        const nextIdx = i + 1 < rawHeaders.length ? rawHeaders[i + 1].lineIdx : lines.length;
+
+        // Walk back past any leading decorator of the next section
+        let endLine = nextIdx - 1;
+        if (endLine >= startLine && isDecoratorLine(lines[endLine])) {
+            endLine--;
+        }
+
+        sections.push({ header, index, headerLine: lineIdx, startLine, endLine });
+    }
+
+    return sections;
+}
+
+/**
+ * Replaces the content lines of a section in a description string.
+ * startLine/endLine are the content range from parseDescriptionSections.
+ * Returns the modified string.
+ * Pure function — no DOM or module dependencies.
+ */
+function applyDescriptionSection(text, startLine, endLine, newContent) {
+    const lines = text.split('\n');
+    return [
+        ...lines.slice(0, startLine),
+        ...newContent.split('\n'),
+        ...lines.slice(endLine + 1),
+    ].join('\n');
+}
+
+/**
+ * Parses the raw AI card-audit text into an array of suggestion objects.
+ * The card prompt produces blocks formatted as:
+ *   **### [Section Name/Header]**
+ *   [replacement content]
+ *   *Reason: [one sentence]*
+ * Returns [] if no valid blocks are found.
+ * Pure function — no DOM or module dependencies.
+ */
+function parseCardSuggestions(rawText) {
+    const suggestions = [];
+    // Split on **### [Header]** block openers, preserving the delimiter
+    const parts = rawText.split(/(?=\*\*#{1,3}\s*\[)/);
+    for (const part of parts) {
+        const headerMatch = part.match(/^\*\*#{1,3}\s*\[(.+?)\]\*{0,2}\s*[\r\n]/);
+        if (!headerMatch) continue;
+        const header = headerMatch[1].trim();
+        const rest   = part.slice(headerMatch[0].length);
+
+        const reasonIdx = rest.search(/^\*Reason:/im);
+        const content   = (reasonIdx !== -1 ? rest.slice(0, reasonIdx) : rest).trim();
+        const reasonMatch = rest.match(/^\*Reason:\s*(.+?)\*?\s*$/im);
+        const reason    = reasonMatch ? reasonMatch[1].trim() : '';
+
+        if (content) suggestions.push({ header, content, reason });
+    }
+    return suggestions;
 }
 
 // ─── Modal HTML ───────────────────────────────────────────────────────────────
@@ -579,16 +743,60 @@ const MODAL_HTML = `
     <div id="chz-step-2" class="chz-step chz-hidden">
       <h3 class="chz-title" data-i18n="chapterize.finalize_title">Finalize Character &amp; Situation</h3>
 
+      <!-- ── Character Workshop ── -->
       <div class="chz-section-header">
-        <span class="chz-label" data-i18n="chapterize.ai_suggested_tweaks">AI Suggested Tweaks</span>
+        <span class="chz-label" data-i18n="chapterize.character_workshop">Character Workshop</span>
         <span id="chz-spin-suggestions" class="chz-section-spin fa-solid fa-spinner fa-spin chz-hidden"></span>
         <button id="chz-regen-suggestions" class="chz-btn chz-btn-secondary chz-btn-sm">&#x21bb;</button>
       </div>
-      <div id="chz-suggestions" class="chz-suggestions-box"></div>
+      <div id="chz-regen-warning" class="chz-warn chz-hidden"
+           data-i18n="chapterize.regen_warning">Draft modified since last generation — suggestions may be out of sync.</div>
 
-      <span class="chz-label" data-i18n="chapterize.edit_char_desc">Edit Character Description</span>
-      <textarea id="chz-card-text" class="chz-textarea chz-textarea-tall" spellcheck="false"></textarea>
+      <div class="chz-tab-bar" id="chz-workshop-tab-bar">
+        <button class="chz-tab-btn chz-tab-active" data-tab="bio"
+                data-i18n="chapterize.tab_bio">Draft Bio</button>
+        <button class="chz-tab-btn" data-tab="raw"
+                data-i18n="chapterize.tab_raw">AI Raw</button>
+        <button class="chz-tab-btn" data-tab="ingester"
+                data-i18n="chapterize.tab_ingester">Ingester</button>
+      </div>
 
+      <div id="chz-tab-bio" class="chz-tab-panel">
+        <textarea id="chz-card-text" class="chz-textarea chz-textarea-tall" spellcheck="false"></textarea>
+        <div class="chz-buttons chz-buttons-left">
+          <button id="chz-revert-bio" class="chz-btn chz-btn-secondary chz-btn-sm"
+                  data-i18n="chapterize.revert_bio">Revert to Original</button>
+        </div>
+      </div>
+
+      <div id="chz-tab-raw" class="chz-tab-panel chz-hidden">
+        <div id="chz-suggestions-raw" class="chz-suggestions-box"></div>
+      </div>
+
+      <div id="chz-tab-ingester" class="chz-tab-panel chz-hidden">
+        <div class="chz-settings-row">
+          <label for="chz-ingester-select" data-i18n="chapterize.suggestion_label">Suggestion</label>
+          <select id="chz-ingester-select" class="chz-select"></select>
+        </div>
+        <div class="chz-ingester-panels">
+          <div class="chz-ingester-panel">
+            <span class="chz-label" data-i18n="chapterize.current_draft_block">Current Draft</span>
+            <textarea id="chz-ingester-current" class="chz-textarea" readonly spellcheck="false"></textarea>
+          </div>
+          <div class="chz-ingester-panel">
+            <span class="chz-label" data-i18n="chapterize.ai_suggestion">AI Suggestion</span>
+            <textarea id="chz-ingester-suggestion" class="chz-textarea" spellcheck="false"></textarea>
+          </div>
+        </div>
+        <div id="chz-ingester-warning" class="chz-warn chz-hidden"
+             data-i18n="chapterize.ingester_no_match">No matching section found in Draft Bio.</div>
+        <div class="chz-buttons">
+          <button id="chz-ingester-apply" class="chz-btn chz-btn-primary"
+                  data-i18n="chapterize.apply_entry">Apply</button>
+        </div>
+      </div>
+
+      <!-- ── Situation Summary ── -->
       <div class="chz-section-header">
         <span class="chz-label" data-i18n="chapterize.situation_summary">Situation Summary</span>
         <span id="chz-spin-situation" class="chz-section-spin fa-solid fa-spinner fa-spin chz-hidden"></span>
@@ -603,11 +811,19 @@ const MODAL_HTML = `
       </div>
 
       <div id="chz-error-2" class="chz-error-banner chz-hidden"></div>
+
       <div class="chz-buttons">
-        <button id="chz-confirm"      class="chz-btn chz-btn-primary"   data-i18n="chapterize.confirm">Confirm</button>
+        <button id="chz-confirm"      class="chz-btn chz-btn-primary"   data-i18n="chapterize.finalize">Finalize</button>
         <button id="chz-lorebook-btn" class="chz-btn chz-btn-secondary" data-i18n="chapterize.update_lorebook">Update Lorebook</button>
         <button id="chz-cancel-2"     class="chz-btn chz-btn-secondary" data-i18n="chapterize.cancel">Cancel</button>
       </div>
+
+      <!-- ── Commit Receipts Panel (visible only after first Finalize attempt) ── -->
+      <div id="chz-receipts" class="chz-receipts chz-hidden">
+        <div class="chz-receipts-title" data-i18n="chapterize.receipts_title">Commit Receipts</div>
+        <div id="chz-receipts-content" class="chz-receipts-content"></div>
+      </div>
+
     </div>
 
   </div>
@@ -681,6 +897,22 @@ function injectModal() {
     $('#chz-confirm').on('click',           onConfirmClick);
     $('#chz-lorebook-btn').on('click',      onUpdateLorebookClick);
     $('#chz-cancel-2').on('click',          closeModal);
+    $('#chz-revert-bio').on('click',        onRevertBioClick);
+    $('#chz-ingester-select').on('change',  onIngesterSectionChange);
+    $('#chz-ingester-apply').on('click',    onIngesterApplyClick);
+
+    // Workshop tab switching — delegated to preserve bindings after modal re-inject
+    $('#chz-modal').on('click', '#chz-workshop-tab-bar .chz-tab-btn', function () {
+        onWorkshopTabSwitch($(this).data('tab'));
+    });
+
+    // Dirty draft tracking — programmatic .val() changes do not fire 'input'
+    $('#chz-modal').on('input', '#chz-card-text', () => {
+        _draftModifiedSinceRegen = true;
+        if (!_suggestionsLoading && _cardSuggestions.length) {
+            $('#chz-regen-warning').removeClass('chz-hidden');
+        }
+    });
 }
 
 function showModal() {
@@ -689,30 +921,208 @@ function showModal() {
 
 function closeModal() {
     $('#chz-overlay').addClass('chz-hidden');
-    _generationId++;
-    _transcript          = '';
-    _originalDescription = '';
-    _priorSituation      = '';
-    _suggestionsLoading  = false;
-    _situationLoading    = false;
-    _isChapterMode       = false;
-    _nextChNum           = 1;
-    _cloneName           = '';
-    _lorebookName        = '';
-    _lorebookData        = null;
-    _lorebookLoading     = false;
+    // Increment all genIds to drop any in-flight AI callbacks
+    _suggestionsGenId++;
+    _situationGenId++;
+    _lorebookGenId++;
+    // Reset all session draft state
+    _transcript              = '';
+    _originalDescription     = '';
+    _priorSituation          = '';
+    _cardSuggestions         = [];
+    _draftModifiedSinceRegen = false;
+    _chapterName             = '';
+    _cloneAvatarUrl          = '';
+    _suggestionsLoading      = false;
+    _situationLoading        = false;
+    _isChapterMode           = false;
+    _nextChNum               = 1;
+    _cloneName               = '';
+    _finalizeSteps.cardSaved     = false;
+    _finalizeSteps.lorebookSaved = false;
+    _finalizeSteps.chatSaved     = false;
+    _lorebookName    = '';
+    _lorebookData    = null;
+    _draftLorebook   = null;
+    _lorebookLoading = false;
 }
 
 function showStep2() {
-    // Strip old situation block so user edits only the description prose
+    // Reset character workshop state for the new session
+    _cardSuggestions         = [];
+    _draftModifiedSinceRegen = false;
+    _chapterName             = '';
+    _cloneAvatarUrl          = '';
+
+    // Populate Draft Bio with the original description
     $('#chz-card-text').val(_originalDescription);
     $('#chz-turns').val(getSettings().turnsN);
     $('#chz-error-2').addClass('chz-hidden').text('');
+    $('#chz-regen-warning').addClass('chz-hidden');
+    $('#chz-suggestions-raw').empty();
+    $('#chz-receipts').addClass('chz-hidden');
+    $('#chz-receipts-content').empty();
+    $('#chz-cancel-2').text('Cancel');
+
+    onWorkshopTabSwitch('bio');
     setSuggestionsLoading(true);
     setSituationLoading(true);
+
     const titleText = _isChapterMode ? `Update to ${_cloneName}` : `Create ${_cloneName}`;
     $('#chz-step-2 .chz-title').text(titleText);
     $('#chz-step-2').removeClass('chz-hidden');
+}
+
+/**
+ * @section Character Workshop UI
+ * @architectural-role UI Orchestration
+ * @description Manages the tabbed Drafting/Ingester interface for character bios.
+ * @core-principles
+ *   1. The Draft Bio textarea is the authoritative source of truth.
+ *   2. The Ingester must re-parse the bio on every tab-switch to capture manual edits.
+ * @api-declaration onWorkshopTabSwitch, populateIngesterDropdown, renderIngesterDetail
+ * @contract
+ *   assertions:
+ *     purity: impure (DOM)
+ *     state_ownership: [_cardSuggestions, _draftModifiedSinceRegen]
+ *     external_io: none
+ */
+
+function onWorkshopTabSwitch(tabName) {
+    $('#chz-workshop-tab-bar .chz-tab-btn').each(function () {
+        $(this).toggleClass('chz-tab-active', $(this).data('tab') === tabName);
+    });
+    $('#chz-tab-bio').toggleClass('chz-hidden',      tabName !== 'bio');
+    $('#chz-tab-raw').toggleClass('chz-hidden',      tabName !== 'raw');
+    $('#chz-tab-ingester').toggleClass('chz-hidden', tabName !== 'ingester');
+
+    // Re-parse bio whenever switching to the Ingester tab
+    if (tabName === 'ingester') {
+        populateIngesterDropdown();
+        const idx = parseInt($('#chz-ingester-select').val(), 10);
+        if (!isNaN(idx) && _cardSuggestions[idx]) {
+            renderIngesterDetail(_cardSuggestions[idx]);
+        }
+    }
+}
+
+/**
+ * Rebuilds the Ingester dropdown from the current _cardSuggestions array.
+ * Called on every Ingester tab open so newly parsed sections are always reflected.
+ */
+function populateIngesterDropdown() {
+    const $sel = $('#chz-ingester-select').empty();
+    if (!_cardSuggestions.length) {
+        $sel.append('<option disabled selected>(no suggestions — check AI Raw tab)</option>');
+        $('#chz-ingester-apply').prop('disabled', true);
+        $('#chz-ingester-current').val('');
+        $('#chz-ingester-suggestion').val('');
+        $('#chz-ingester-warning').addClass('chz-hidden');
+        return;
+    }
+    // Count total occurrences of each header so we know when to show "(n)" suffixes
+    const headerTotals = {};
+    _cardSuggestions.forEach(s => {
+        const key = s.header.toLowerCase();
+        headerTotals[key] = (headerTotals[key] || 0) + 1;
+    });
+
+    // Build options; add "(1)", "(2)" … when a header appears more than once
+    const headerSeen = {};
+    _cardSuggestions.forEach((s, i) => {
+        const key = s.header.toLowerCase();
+        headerSeen[key] = (headerSeen[key] || 0) + 1;
+        const suffix = headerTotals[key] > 1 ? ` (${headerSeen[key]})` : '';
+        const base   = `${s.header}${suffix}`;
+        const label  = s._applied ? `\u2713 ${base}` : base;
+        $sel.append(`<option value="${i}">${escapeHtml(label)}</option>`);
+    });
+    $('#chz-ingester-apply').prop('disabled', false);
+}
+
+/**
+ * Renders the detail pane for the given suggestion: looks up the matching
+ * section in the current Draft Bio and populates Current Draft / AI Suggestion.
+ */
+function renderIngesterDetail(suggestion) {
+    if (!suggestion) return;
+    $('#chz-ingester-suggestion').val(suggestion.content);
+    $('#chz-ingester-warning').addClass('chz-hidden');
+    $('#chz-ingester-apply').prop('disabled', false);
+
+    const bioText     = $('#chz-card-text').val();
+    const sections    = parseDescriptionSections(bioText);
+    const headerLower = suggestion.header.toLowerCase();
+
+    // Determine which occurrence of this header the suggestion targets —
+    // the nth suggestion for a given header maps to the nth bio section.
+    const suggestionIdx   = _cardSuggestions.indexOf(suggestion);
+    const targetOccurrence = _cardSuggestions
+        .slice(0, suggestionIdx + 1)
+        .filter(s => s.header.toLowerCase() === headerLower)
+        .length;
+
+    const match = sections.find(
+        s => s.header.toLowerCase() === headerLower && s.index === targetOccurrence,
+    );
+
+    if (match) {
+        const lines = bioText.split('\n');
+        $('#chz-ingester-current').val(lines.slice(match.startLine, match.endLine + 1).join('\n'));
+    } else {
+        $('#chz-ingester-current').val('');
+        $('#chz-ingester-warning').removeClass('chz-hidden');
+        $('#chz-ingester-apply').prop('disabled', true);
+    }
+}
+
+function onIngesterSectionChange() {
+    const idx = parseInt($('#chz-ingester-select').val(), 10);
+    if (!isNaN(idx) && _cardSuggestions[idx]) {
+        renderIngesterDetail(_cardSuggestions[idx]);
+    }
+}
+
+function onIngesterApplyClick() {
+    const idx = parseInt($('#chz-ingester-select').val(), 10);
+    if (isNaN(idx) || !_cardSuggestions[idx]) return;
+
+    const suggestion  = _cardSuggestions[idx];
+    const newContent  = $('#chz-ingester-suggestion').val();
+    const bioText     = $('#chz-card-text').val();
+    const sections    = parseDescriptionSections(bioText);
+    const headerLower = suggestion.header.toLowerCase();
+
+    // Match the correct occurrence: nth suggestion for header → nth bio section
+    const targetOccurrence = _cardSuggestions
+        .slice(0, idx + 1)
+        .filter(s => s.header.toLowerCase() === headerLower)
+        .length;
+    const match = sections.find(
+        s => s.header.toLowerCase() === headerLower && s.index === targetOccurrence,
+    );
+
+    if (!match) return; // button should be disabled; guard anyway
+
+    const updated = applyDescriptionSection(bioText, match.startLine, match.endLine, newContent);
+    $('#chz-card-text').val(updated);
+
+    // Mark as applied in dropdown and on the suggestion object
+    _cardSuggestions[idx]._applied = true;
+    const $opt = $(`#chz-ingester-select option[value="${idx}"]`);
+    if (!$opt.text().startsWith('\u2713')) {
+        $opt.text('\u2713 ' + $opt.text());
+    }
+
+    // Refresh the Current Draft pane to show the applied content
+    renderIngesterDetail(_cardSuggestions[idx]);
+}
+
+function onRevertBioClick() {
+    $('#chz-card-text').val(_originalDescription);
+    // Revert clears the dirty flag — we're back to the original
+    _draftModifiedSinceRegen = false;
+    $('#chz-regen-warning').addClass('chz-hidden');
 }
 
 // ─── Section Loading State ────────────────────────────────────────────────────
@@ -721,7 +1131,10 @@ function setSuggestionsLoading(isLoading) {
     _suggestionsLoading = isLoading;
     $('#chz-spin-suggestions').toggleClass('chz-hidden', !isLoading);
     $('#chz-regen-suggestions').prop('disabled', isLoading);
-    if (isLoading) $('#chz-suggestions').empty();
+    if (isLoading) {
+        $('#chz-suggestions-raw').empty();
+        _cardSuggestions = [];
+    }
     updateConfirmState();
 }
 
@@ -740,7 +1153,12 @@ function updateConfirmState() {
 
 function populateSuggestions(text) {
     setSuggestionsLoading(false);
-    $('#chz-suggestions').html('<pre>' + escapeHtml(text) + '</pre>');
+    _cardSuggestions = parseCardSuggestions(text);
+    $('#chz-suggestions-raw').html('<pre>' + escapeHtml(text) + '</pre>');
+    // If the Ingester tab is currently open, refresh its dropdown
+    if (!$('#chz-tab-ingester').hasClass('chz-hidden')) {
+        populateIngesterDropdown();
+    }
 }
 
 function populateSituation(text) {
@@ -750,12 +1168,39 @@ function populateSituation(text) {
 
 function showSuggestionsError(message) {
     setSuggestionsLoading(false);
-    $('#chz-suggestions').html(`<span class="chz-error-inline">${escapeHtml(message)}</span>`);
+    $('#chz-suggestions-raw').html(`<span class="chz-error-inline">${escapeHtml(message)}</span>`);
 }
 
 function showSituationError(message) {
     setSituationLoading(false);
     $('#chz-error-2').text(message).removeClass('chz-hidden');
+}
+
+// ─── Commit Receipts Panel ────────────────────────────────────────────────────
+
+function showReceiptsPanel() {
+    $('#chz-receipts').removeClass('chz-hidden');
+}
+
+/**
+ * Creates or updates a named receipt row in the receipts panel.
+ * @param {string} id      - element ID for this row (e.g. 'chz-receipt-card')
+ * @param {string} html    - inner HTML for the row
+ */
+function upsertReceiptItem(id, html) {
+    if (!$(`#${id}`).length) {
+        $('#chz-receipts-content').append(`<div id="${id}" class="chz-receipt-row"></div>`);
+    }
+    $(`#${id}`).html(html);
+}
+
+function receiptSuccess(text, hint = null) {
+    return `<span class="chz-receipt-item success">&#x2713; ${escapeHtml(text)}</span>` +
+           (hint ? `<div class="chz-receipt-hint">${escapeHtml(hint)}</div>` : '');
+}
+
+function receiptFailure(text) {
+    return `<span class="chz-receipt-item failure">&#x2717; ${escapeHtml(text)}</span>`;
 }
 
 // ─── Lorebook Modal UI ────────────────────────────────────────────────────────
@@ -805,6 +1250,20 @@ function showLbError(message) {
     $('#lbchz-error').text(message).removeClass('chz-hidden');
 }
 
+/**
+ * @section Lorebook Workshop
+ * @architectural-role UI Orchestration / Staging
+ * @description Handles lorebook suggestion parsing and in-memory drafting.
+ * @core-principles
+ *   1. MUST NOT commit writes to server; all changes must be staged in _draftLorebook.
+ *   2. Must provide visual confirmation of "staged" vs "unstaged" entries.
+ * @api-declaration onLbTabSwitch, lbApplySuggestion, matchEntryByComment
+ * @contract
+ *   assertions:
+ *     purity: impure (DOM)
+ *     state_ownership: [_draftLorebook, _lorebookData, _lorebookName]
+ *     external_io: none
+ */
 function onLbTabSwitch(tabName) {
     $('#lbchz-modal .chz-tab-btn').each(function () {
         $(this).toggleClass('chz-tab-active', $(this).data('tab') === tabName);
@@ -845,7 +1304,7 @@ function renderLbIngesterDetail(suggestion) {
     if (suggestion.type === 'UPDATE') {
         const uid = matchEntryByComment(suggestion.name);
         const currentContent = uid !== null
-            ? (_lorebookData.entries[uid].content || '')
+            ? (_draftLorebook.entries[uid].content || '')
             : '(no existing entry matched — will create new)';
         $('#lbchz-current-content').val(currentContent);
         $('#lbchz-update-section').removeClass('chz-hidden');
@@ -865,20 +1324,21 @@ function onLbSuggestionSelectChange() {
 // ─── Lorebook Apply ───────────────────────────────────────────────────────────
 
 /**
- * Applies a single suggestion to _lorebookData and persists it to the server.
+ * Stages a single suggestion into _draftLorebook (no server write).
  * For UPDATE: mutates the matched entry (or creates new if no match).
  * For NEW: always creates a new entry with ST worldinfo defaults.
+ * The actual server write happens on Finalize.
  */
-async function lbApplySuggestion({ type, name, keys, content }) {
+function lbApplySuggestion({ type, name, keys, content }) {
     const uid = matchEntryByComment(name);
     if (uid !== null && type === 'UPDATE') {
-        // Mutate existing entry in-place
-        _lorebookData.entries[uid].content = content;
-        _lorebookData.entries[uid].key     = keys;
+        // Mutate existing entry in the draft
+        _draftLorebook.entries[uid].content = content;
+        _draftLorebook.entries[uid].key     = keys;
     } else {
-        // Create new entry (also handles unmatched UPDATE)
+        // Create new entry in the draft (also handles unmatched UPDATE)
         const newUid = nextLorebookUid();
-        _lorebookData.entries[String(newUid)] = {
+        _draftLorebook.entries[String(newUid)] = {
             uid:                        newUid,
             key:                        keys,
             keysecondary:               [],
@@ -922,10 +1382,10 @@ async function lbApplySuggestion({ type, name, keys, content }) {
             displayIndex:               newUid,
         };
     }
-    await lbSaveLorebook(_lorebookName, _lorebookData);
+    // No server write — _draftLorebook is committed in bulk on Finalize
 }
 
-async function onLbApplyEntry() {
+function onLbApplyEntry() {
     const suggestions = parseLbSuggestions($('#lbchz-freeform').val());
     const idx = parseInt($('#lbchz-suggestion-select').val(), 10);
     if (isNaN(idx) || !suggestions[idx]) return;
@@ -939,56 +1399,35 @@ async function onLbApplyEntry() {
         content: $('#lbchz-suggested-content').val().trim(),
     };
 
-    $('#lbchz-apply-one, #lbchz-apply-all').prop('disabled', true);
     $('#lbchz-error-ingester').addClass('chz-hidden').text('');
+    lbApplySuggestion(suggestion);
 
-    try {
-        await lbApplySuggestion(suggestion);
-        // Mark entry as applied in the dropdown
-        const $opt = $('#lbchz-suggestion-select option:selected');
-        if (!$opt.text().startsWith('✓')) {
-            $opt.text('✓ ' + $opt.text());
-        }
-    } catch (err) {
-        console.error('[Chapterize] Lorebook apply failed:', err);
-        $('#lbchz-error-ingester').text(`Apply failed: ${err.message}`).removeClass('chz-hidden');
-    } finally {
-        $('#lbchz-apply-one, #lbchz-apply-all').prop('disabled', false);
+    // Mark entry as staged in the dropdown
+    const $opt = $('#lbchz-suggestion-select option:selected');
+    if (!$opt.text().startsWith('\u2713')) {
+        $opt.text('\u2713 staged: ' + $opt.text());
     }
+    // Refresh current-content pane to show the newly staged value
+    renderLbIngesterDetail(suggestions[idx]);
 }
 
-async function onLbApplyAll() {
+function onLbApplyAll() {
     const suggestions = parseLbSuggestions($('#lbchz-freeform').val());
     if (!suggestions.length) return;
 
-    $('#lbchz-apply-one, #lbchz-apply-all').prop('disabled', true);
     $('#lbchz-error-ingester').addClass('chz-hidden').text('');
 
-    let applied = 0;
-    let failed  = 0;
-    // Sequential — avoids uid collision when multiple NEW entries are added
+    // Sequential application — avoids uid collision when multiple NEW entries are staged
     for (const s of suggestions) {
-        try {
-            await lbApplySuggestion(s);
-            applied++;
-        } catch (err) {
-            console.error('[Chapterize] Lorebook apply-all item failed:', err);
-            failed++;
+        lbApplySuggestion(s);
+    }
+
+    toastr.success(`Staged ${suggestions.length} lorebook suggestion${suggestions.length !== 1 ? 's' : ''} — will be saved on Finalize.`);
+    $('#lbchz-suggestion-select option').each(function () {
+        if (!$(this).text().startsWith('\u2713')) {
+            $(this).text('\u2713 staged: ' + $(this).text());
         }
-    }
-
-    $('#lbchz-apply-one, #lbchz-apply-all').prop('disabled', false);
-
-    if (failed === 0) {
-        toastr.success(`Applied ${applied} lorebook suggestion${applied !== 1 ? 's' : ''}.`);
-        $('#lbchz-suggestion-select option').each(function () {
-            if (!$(this).text().startsWith('✓')) $(this).text('✓ ' + $(this).text());
-        });
-    } else {
-        $('#lbchz-error-ingester')
-            .text(`Applied ${applied}, failed ${failed}. Check the console for details.`)
-            .removeClass('chz-hidden');
-    }
+    });
 }
 
 // ─── Event Handlers ───────────────────────────────────────────────────────────
@@ -1030,35 +1469,40 @@ async function onChapterizeClick() {
     showModal();
     showStep2();
 
-    // Capture the generation ID for this invocation so that stale callbacks
-    // from a previous invocation that is still in flight are silently dropped.
-    const genId = ++_generationId;
+    // Capture per-call generation IDs so stale callbacks from prior invocations
+    // are silently discarded. Suggestions and situation run independently.
+    const sugId = ++_suggestionsGenId;
+    const sitId = ++_situationGenId;
 
     // Fire both calls in parallel — each resolves into its own section.
-    runSuggestionsCall()
-        .then(text => { if (_generationId !== genId) return; populateSuggestions(text); })
+    // Initial suggestions call seeds from _originalDescription; regens use live textarea.
+    runSuggestionsCall(_originalDescription)
+        .then(text => { if (_suggestionsGenId !== sugId) return; populateSuggestions(text); })
         .catch(err => {
-            if (_generationId !== genId) return;
+            if (_suggestionsGenId !== sugId) return;
             console.error('[Chapterize] Suggestions call failed:', err);
             showSuggestionsError(`Generation failed: ${err.message}`);
         });
 
     runSituationCall()
-        .then(text => { if (_generationId !== genId) return; populateSituation(text); })
+        .then(text => { if (_situationGenId !== sitId) return; populateSituation(text); })
         .catch(err => {
-            if (_generationId !== genId) return;
+            if (_situationGenId !== sitId) return;
             console.error('[Chapterize] Situation call failed:', err);
             showSituationError(`Situation generation failed: ${err.message}`);
         });
 }
 
 function onRegenSuggestionsClick() {
+    _draftModifiedSinceRegen = false;
+    $('#chz-regen-warning').addClass('chz-hidden');
     setSuggestionsLoading(true);
-    const genId = _generationId;
-    runSuggestionsCall()
-        .then(text => { if (_generationId !== genId) return; populateSuggestions(text); })
+    const sugId   = ++_suggestionsGenId;
+    const bioText = $('#chz-card-text').val();
+    runSuggestionsCall(bioText)
+        .then(text => { if (_suggestionsGenId !== sugId) return; populateSuggestions(text); })
         .catch(err => {
-            if (_generationId !== genId) return;
+            if (_suggestionsGenId !== sugId) return;
             console.error('[Chapterize] Suggestions regen failed:', err);
             showSuggestionsError(`Regeneration failed: ${err.message}`);
         });
@@ -1066,11 +1510,11 @@ function onRegenSuggestionsClick() {
 
 function onRegenSituationClick() {
     setSituationLoading(true);
-    const genId = _generationId;
+    const sitId = ++_situationGenId;
     runSituationCall()
-        .then(text => { if (_generationId !== genId) return; populateSituation(text); })
+        .then(text => { if (_situationGenId !== sitId) return; populateSituation(text); })
         .catch(err => {
-            if (_generationId !== genId) return;
+            if (_situationGenId !== sitId) return;
             console.error('[Chapterize] Situation regen failed:', err);
             showSituationError(`Regeneration failed: ${err.message}`);
         });
@@ -1089,6 +1533,11 @@ async function onUpdateLorebookClick() {
 
     try {
         _lorebookData = await lbEnsureLorebook(_lorebookName);
+        // Deep-clone into the draft on first open only — preserves any staged changes
+        // if the lorebook modal is closed and reopened within the same session.
+        if (!_draftLorebook) {
+            _draftLorebook = structuredClone(_lorebookData);
+        }
     } catch (err) {
         toastr.error(`Could not load lorebook: ${err.message}`);
         return;
@@ -1097,11 +1546,11 @@ async function onUpdateLorebookClick() {
     showLbModal();
     setLbLoading(true);
 
-    const genId = _generationId;
+    const lbId = ++_lorebookGenId;
     runLorebookCall()
-        .then(text => { if (_generationId !== genId) return; populateLbFreeform(text); })
+        .then(text => { if (_lorebookGenId !== lbId) return; populateLbFreeform(text); })
         .catch(err => {
-            if (_generationId !== genId) return;
+            if (_lorebookGenId !== lbId) return;
             console.error('[Chapterize] Lorebook call failed:', err);
             showLbError(`Generation failed: ${err.message}`);
         });
@@ -1110,145 +1559,181 @@ async function onUpdateLorebookClick() {
 function onLbRegenClick() {
     setLbLoading(true);
     $('#lbchz-error').addClass('chz-hidden').text('');
-    const genId = _generationId;
+    const lbId = ++_lorebookGenId;
     runLorebookCall()
-        .then(text => { if (_generationId !== genId) return; populateLbFreeform(text); })
+        .then(text => { if (_lorebookGenId !== lbId) return; populateLbFreeform(text); })
         .catch(err => {
-            if (_generationId !== genId) return;
+            if (_lorebookGenId !== lbId) return;
             console.error('[Chapterize] Lorebook regen failed:', err);
             showLbError(`Regeneration failed: ${err.message}`);
         });
 }
 
+/**
+ * @section Finalize Flow (The Committer)
+ * @architectural-role Workflow Controller / Persistence
+ * @description Executes the sequential commit of all staged data to the ST server.
+ * @core-principles
+ *   1. Must be idempotent via _finalizeSteps; skip already-succeeded steps on retry.
+ *   2. Must provide explicit receipts for every attempted persistence operation.
+ *   3. Must relabel Cancel to Close upon first successful partial commit.
+ * @api-declaration onConfirmClick, upsertReceiptItem
+ * @contract
+ *   assertions:
+ *     purity: impure
+ *     state_ownership: [_finalizeSteps, _chapterName, _cloneAvatarUrl]
+ *     external_io: [saveCharacter, lbSaveLorebook, saveNewChat]
+ */
 async function onConfirmClick() {
+    // Read inputs fresh on every attempt (including retries)
     let cardText        = $('#chz-card-text').val().trim();
     const situationText = $('#chz-situation-text').val().trim();
     const rawTurns      = parseInt($('#chz-turns').val(), 10);
     const turnsToCarry  = Math.max(MIN_TURNS, Math.min(MAX_TURNS, isNaN(rawTurns) ? DEFAULT_TURNS_N : rawTurns));
 
-    // Last-resort guard: strip any situation block the user may have left in
-    // the description textarea (e.g. pasted from outside).
-    const separatorIndex = cardText.indexOf(SITUATION_SEP);
-    if (separatorIndex !== -1) {
-        cardText = cardText.slice(0, separatorIndex);
-    }
+    // Last-resort guard: strip any situation block the user may have pasted in
+    const sepIdx2 = cardText.indexOf(SITUATION_SEP);
+    if (sepIdx2 !== -1) cardText = cardText.slice(0, sepIdx2);
+
+    const newDescription = `${cardText}${SITUATION_SEP}${situationText}`;
 
     $('#chz-confirm, #chz-cancel-2, #chz-lorebook-btn').prop('disabled', true);
+    $('#chz-error-2').addClass('chz-hidden').text('');
+    showReceiptsPanel();
 
-    const context        = SillyTavern.getContext();
-    const char           = context.characters[context.characterId];
-    const newDescription = `${cardText}${SITUATION_SEP}${situationText}`;
-    const lastN          = buildLastN(context.chat, turnsToCarry);
+    // Capture context and chat data before any character-switching operations
+    const context      = SillyTavern.getContext();
+    const char         = context.characters[context.characterId];
+    const chatMetadata = context.chatMetadata;
+    const lastN        = buildLastN(context.chat, turnsToCarry);
 
-    if (_isChapterMode) {
-        // ── Chapter card: update description AND bump display name in place ──
-        // The avatar file (and all its chats) stays the same; only the display
-        // name embedded in the PNG metadata changes (e.g. "(Ch2)" → "(Ch3)").
-
-        const charSavePromise    = saveCharacter(char, newDescription, _cloneName);
-        const chapterNamePromise = deriveChapterName(char.avatar);
-        chapterNamePromise.catch(() => {});
-
-        let isCharacterSaved = false;
-        let chapterName;
-        let freshChar;
-
+    // ── Step 1: Card Save ──────────────────────────────────────────────────────
+    if (!_finalizeSteps.cardSaved) {
         try {
-            await charSavePromise;
-            isCharacterSaved = true;
-            // Reload character list so ST's in-memory state reflects the renamed card;
-            // then re-select by avatar — mirrors what the clone path does.
-            await getCharacters();
-            const freshContext = SillyTavern.getContext();
-            const updatedIdx   = freshContext.characters.findIndex(c => c.avatar === char.avatar);
-            if (updatedIdx === -1) {
-                throw new Error('Character was saved but could not be located after reload.');
+            if (_isChapterMode) {
+                // Chapter mode: save description + bump display name in place.
+                // Sequential: derive name only after save succeeds, so a save
+                // failure does not leave _chapterName set to a stale value.
+                await saveCharacter(char, newDescription, _cloneName);
+                _chapterName = await deriveChapterName(char.avatar);
+                await getCharacters();
+                const freshCtx = SillyTavern.getContext();
+                const idx = freshCtx.characters.findIndex(c => c.avatar === char.avatar);
+                if (idx === -1) throw new Error('Character was saved but could not be located after reload.');
+                await selectCharacterById(idx);
+            } else {
+                // Clone mode: create new character card as "CharName (Ch1)".
+                _cloneAvatarUrl = await createCharacterClone(char, _cloneName, newDescription);
+                await getCharacters();
+                const freshCtx = SillyTavern.getContext();
+                if (freshCtx.characters.findIndex(c => c.avatar === _cloneAvatarUrl) === -1) {
+                    throw new Error(`Created ${_cloneName} but could not locate it in the character list.`);
+                }
+                _chapterName = await deriveChapterName(_cloneAvatarUrl);
             }
-            await selectCharacterById(updatedIdx);
-            freshChar   = SillyTavern.getContext().characters[updatedIdx];
-            chapterName = await chapterNamePromise;
+
+            _finalizeSteps.cardSaved = true;
+            persistChangelog(_chapterName);
+            upsertReceiptItem('chz-receipt-card', receiptSuccess(
+                `Character card saved as "${_cloneName}"`,
+                'further edits will overwrite this on retry',
+            ));
+            // Relabel Cancel → Close once any step has committed
+            $('#chz-cancel-2').text('Close');
+
         } catch (err) {
-            const suffix = isCharacterSaved ? ' (Character card was already saved.)' : '';
-            $('#chz-error-2').text(`${err.message}${suffix}`).removeClass('chz-hidden');
-            $('#chz-confirm, #chz-cancel-2, #chz-lorebook-btn').prop('disabled', false);
-            return;
-        }
-
-        persistChangelog(chapterName);
-
-        try {
-            await saveNewChat(freshChar, chapterName, context.chatMetadata, lastN);
-        } catch (err) {
-            $('#chz-error-2').text(`${err.message} The character card has already been saved.`).removeClass('chz-hidden');
-            $('#chz-confirm, #chz-cancel-2, #chz-lorebook-btn').prop('disabled', false);
-            return;
-        }
-
-        try {
-            await openCharacterChat(chapterName);
-        } catch (err) {
-            console.error('[Chapterize] openCharacterChat failed:', err);
-            closeModal();
-            toastr.warning("Chapter created. Could not auto-open — open it manually from the character's chat list.");
-            return;
-        }
-
-        closeModal();
-
-    } else {
-        // ── Original character: clone it as "CharName (Ch1)" ─────────────────
-
-        const cloneName = _cloneName || `${char.name} (Ch1)`;
-
-        let cloneAvatarUrl;
-        try {
-            cloneAvatarUrl = await createCharacterClone(char, cloneName, newDescription);
-        } catch (err) {
+            upsertReceiptItem('chz-receipt-card', receiptFailure(`Card save failed: ${err.message}`));
             $('#chz-error-2').text(err.message).removeClass('chz-hidden');
             $('#chz-confirm, #chz-cancel-2, #chz-lorebook-btn').prop('disabled', false);
             return;
         }
-
-        // Refresh the character list so the clone is visible and selectable.
-        await getCharacters();
-        const freshContext = SillyTavern.getContext();
-        const newCharIdx   = freshContext.characters.findIndex(c => c.avatar === cloneAvatarUrl);
-        if (newCharIdx === -1) {
-            $('#chz-error-2')
-                .text(`Created ${cloneName} but could not locate it in the character list. Please select it manually.`)
-                .removeClass('chz-hidden');
-            $('#chz-confirm, #chz-cancel-2, #chz-lorebook-btn').prop('disabled', false);
-            return;
-        }
-
-        const cloneChar   = freshContext.characters[newCharIdx];
-        const chapterName = await deriveChapterName(cloneAvatarUrl);
-
-        persistChangelog(chapterName);
-
-        try {
-            await saveNewChat(cloneChar, chapterName, context.chatMetadata, lastN);
-        } catch (err) {
-            $('#chz-error-2')
-                .text(`${err.message} Character ${cloneName} was created but the chat could not be saved.`)
-                .removeClass('chz-hidden');
-            $('#chz-confirm, #chz-cancel-2, #chz-lorebook-btn').prop('disabled', false);
-            return;
-        }
-
-        try {
-            await selectCharacterById(newCharIdx);
-            await openCharacterChat(chapterName);
-        } catch (err) {
-            console.error('[Chapterize] Character switch failed:', err);
-            closeModal();
-            toastr.warning(`${cloneName} created. Select it from the character list and open chat "${chapterName}".`);
-
-            return;
-        }
-
-        closeModal();
     }
+
+    // ── Step 2: Lorebook Save ──────────────────────────────────────────────────
+    if (!_finalizeSteps.lorebookSaved) {
+        if (_draftLorebook && _lorebookName) {
+            try {
+                await lbSaveLorebook(_lorebookName, _draftLorebook);
+                _finalizeSteps.lorebookSaved = true;
+
+                // Report which entries were actually modified vs the original server copy
+                const changedNames = Object.values(_draftLorebook.entries ?? {})
+                    .filter(e => {
+                        const orig = _lorebookData?.entries?.[String(e.uid)];
+                        return !orig
+                            || orig.content !== e.content
+                            || JSON.stringify(orig.key) !== JSON.stringify(e.key);
+                    })
+                    .map(e => e.comment || String(e.uid));
+
+                const nameList = changedNames.length
+                    ? changedNames.map(n => `"${n}"`).join(', ')
+                    : '(no changes staged)';
+
+                upsertReceiptItem('chz-receipt-lorebook', receiptSuccess(
+                    `Lorebook entries committed: ${nameList}`,
+                    'additional staged entries will also be written on retry',
+                ));
+            } catch (err) {
+                upsertReceiptItem('chz-receipt-lorebook', receiptFailure(
+                    `Lorebook save failed: ${err.message}`,
+                ));
+                $('#chz-error-2')
+                    .text(`Character card already saved — lorebook write failed: ${err.message}`)
+                    .removeClass('chz-hidden');
+                $('#chz-confirm, #chz-cancel-2, #chz-lorebook-btn').prop('disabled', false);
+                return;
+            }
+        } else {
+            // No lorebook was opened this session — mark done and show neutral row
+            _finalizeSteps.lorebookSaved = true;
+            upsertReceiptItem('chz-receipt-lorebook', receiptSuccess('Lorebook: no changes staged'));
+        }
+    }
+
+    // ── Step 3: Chat Save ──────────────────────────────────────────────────────
+    if (!_finalizeSteps.chatSaved) {
+        try {
+            const freshCtx   = SillyTavern.getContext();
+            const avatarKey  = _isChapterMode ? char.avatar : _cloneAvatarUrl;
+            const freshIdx   = freshCtx.characters.findIndex(c => c.avatar === avatarKey);
+            if (freshIdx === -1) throw new Error('Could not locate character for chat save.');
+            const freshChar  = freshCtx.characters[freshIdx];
+
+            await saveNewChat(freshChar, _chapterName, chatMetadata, lastN);
+            _finalizeSteps.chatSaved = true;
+            upsertReceiptItem('chz-receipt-chat', receiptSuccess(
+                `Chat saved: "${_chapterName}"`,
+            ));
+        } catch (err) {
+            upsertReceiptItem('chz-receipt-chat', receiptFailure(
+                `Chat save failed — retry will attempt this step only`,
+            ));
+            $('#chz-error-2')
+                .text(`Character card and lorebook already saved — chat creation failed: ${err.message}`)
+                .removeClass('chz-hidden');
+            $('#chz-confirm, #chz-cancel-2, #chz-lorebook-btn').prop('disabled', false);
+            return;
+        }
+    }
+
+    // ── Step 4: Navigate ───────────────────────────────────────────────────────
+    try {
+        // For clone mode: switch active character to the new clone before opening chat
+        if (!_isChapterMode && _cloneAvatarUrl) {
+            const freshCtx = SillyTavern.getContext();
+            const idx = freshCtx.characters.findIndex(c => c.avatar === _cloneAvatarUrl);
+            if (idx !== -1) await selectCharacterById(idx);
+        }
+        await openCharacterChat(_chapterName);
+    } catch (err) {
+        console.error('[Chapterize] Navigation failed:', err);
+        closeModal();
+        toastr.warning(`Chapter created. Could not auto-open — open "${_chapterName}" manually from the chat list.`);
+        return;
+    }
+
+    closeModal();
 }
 
 // ─── Settings Panel ───────────────────────────────────────────────────────────

@@ -55,50 +55,59 @@ Single-file JS. No build step. Imports from ST core (`script.js`, `extensions.js
                     │  │  │     — buildTranscript()   │  │   │
                     │  │  │                           │  │   │
                     │  │  │  2. showModal()           │  │   │
-                    │  │  │     showStep2() (single   │  │   │
-                    │  │  │     step — no Step 1)     │  │   │
+                    │  │  │     showStep2()           │  │   │
                     │  │  │                           │  │   │
                     │  │  │  3. callLLM() ×2          │  │   │
                     │  │  │     [parallel, unblocked] │  │   │
                     │  │  │     a) suggestions call   │  │   │
-                    │  │  │        → suggestions box  │  │   │
+                    │  │  │        → AI Raw tab       │  │   │
+                    │  │  │        → Ingester parsed  │  │   │
                     │  │  │     b) situation call     │  │   │
                     │  │  │        → situation text   │  │   │
                     │  │  │                           │  │   │
                     │  │  │  ┌───────────────────┐   │  │   │
                     │  │  │  │  [Update Lorebook] │   │  │   │
                     │  │  │  │  fires 3rd LLM     │   │  │   │
-                    │  │  │  │  call; writes are  │   │  │   │
-                    │  │  │  │  per-entry/        │   │  │   │
-                    │  │  │  │  immediate;        │   │  │   │
-                    │  │  │  │  does not gate     │   │  │   │
-                    │  │  │  │  Confirm           │   │  │   │
+                    │  │  │  │  call; Apply stages │   │  │   │
+                    │  │  │  │  into _draftLorebook│   │  │   │
+                    │  │  │  │  only (no server    │   │  │   │
+                    │  │  │  │  write until        │   │  │   │
+                    │  │  │  │  Finalize)          │   │  │   │
                     │  │  │  └───────────────────┘   │  │   │
                     │  │  └────┬──────────────────────┘  │   │
-                    │  │       │ confirm                  │   │
+                    │  │       │ Finalize                 │   │
                     │  │  ┌────▼──────────────────────┐  │   │
                     │  │  │     onConfirmClick()       │  │   │
+                    │  │  │   (Draft/Commit — 4 steps) │  │   │
                     │  │  │                           │  │   │
-                    │  │  │  persistChangelog()       │  │   │
+                    │  │  │  Step 1: Card Save        │  │   │
+                    │  │  │    if _isChapterMode:     │  │   │
+                    │  │  │      saveCharacter()      │  │   │
+                    │  │  │      deriveChapterName()  │  │   │
+                    │  │  │      getCharacters()      │  │   │
+                    │  │  │      selectCharacterById()│  │   │
+                    │  │  │    else (base char):      │  │   │
+                    │  │  │      createCharacterClone │  │   │
+                    │  │  │      getCharacters()      │  │   │
+                    │  │  │      deriveChapterName()  │  │   │
+                    │  │  │    persistChangelog()     │  │   │
                     │  │  │                           │  │   │
-                    │  │  │  if _isChapterMode:       │  │   │
-                    │  │  │    saveCharacter()        │  │   │
-                    │  │  │    (bumps name ChX→X+1)   │  │   │
-                    │  │  │    getCharacters()        │  │   │
-                    │  │  │    selectCharacterById()  │  │   │
-                    │  │  │    deriveChapterName()    │  │   │
+                    │  │  │  Step 2: Lorebook Save    │  │   │
+                    │  │  │    lbSaveLorebook(        │  │   │
+                    │  │  │      _draftLorebook)      │  │   │
+                    │  │  │    (skipped if no draft)  │  │   │
+                    │  │  │                           │  │   │
+                    │  │  │  Step 3: Chat Save        │  │   │
                     │  │  │    saveNewChat()          │  │   │
+                    │  │  │                           │  │   │
+                    │  │  │  Step 4: Navigate         │  │   │
+                    │  │  │    selectCharacterById()  │  │   │
                     │  │  │    openCharacterChat()    │  │   │
                     │  │  │                           │  │   │
-                    │  │  │  else (base character):   │  │   │
-                    │  │  │    createCharacterClone() │  │   │
-                    │  │  │    getCharacters()        │  │   │
-                    │  │  │    deriveChapterName()    │  │   │
-                    │  │  │    saveNewChat()          │  │   │
-                    │  │  │    selectCharacterById()  │  │   │
-                    │  │  │    openCharacterChat()    │  │   │
-                    │  │  │                           │  │   │
-                    │  │  │  closeModal()             │  │   │
+                    │  │  │  Commit Receipts panel    │  │   │
+                    │  │  │  shows per-step outcome;  │  │   │
+                    │  │  │  safe to retry from any   │  │   │
+                    │  │  │  failed step              │  │   │
                     │  │  └───────────────────────────┘  │   │
                     │  └─────────────────────────────────┘   │
                     └─────────────────────────────────────────┘
@@ -135,13 +144,92 @@ The situation summary is stored at the end of the description field using:
 ```
 
 On each invocation the extension splits on this separator:
-- `_originalDescription` ← everything before it (what the user edits)
+- `_originalDescription` ← everything before it (what the user edits in Draft Bio)
 - `_priorSituation` ← everything after it (fed to the situation prompt as `PRIOR CHAPTER SUMMARY`)
 
-On Confirm:
+On Finalize:
 ```
 newDescription = cardText + SITUATION_SEP + situationText
 ```
+
+---
+
+## Draft/Commit Architecture
+
+All user edits and AI-generated content are **staged in memory** until Finalize is clicked. No server write occurs before that point.
+
+```
+┌────────────────────────────────────────────────────┐
+│  DRAFT PHASE (all in-memory, zero server writes)   │
+│                                                    │
+│  Character Workshop                                │
+│    Draft Bio textarea  ← editable                  │
+│    AI Raw tab          ← raw card-audit text       │
+│    Ingester tab        ← Apply patches Draft Bio   │
+│                           in-place (memory only)   │
+│                                                    │
+│  Lorebook Workshop                                 │
+│    Freeform textarea   ← editable AI output        │
+│    Ingester tab        ← Apply Entry/Apply All     │
+│                           stages into _draftLorebook│
+│                           (memory only)            │
+│                                                    │
+│  Situation Summary textarea  ← editable            │
+└───────────────────────┬────────────────────────────┘
+                        │ Finalize click
+┌───────────────────────▼────────────────────────────┐
+│  COMMIT PHASE (sequential, with receipts)          │
+│                                                    │
+│  Step 1 — Card Save        _finalizeSteps.cardSaved│
+│  Step 2 — Lorebook Save    _finalizeSteps.lorebookSaved│
+│  Step 3 — Chat Save        _finalizeSteps.chatSaved│
+│  Step 4 — Navigate         (not flagged; retried)  │
+│                                                    │
+│  Each step is idempotent behind its flag.          │
+│  A retry re-enters at the first un-flagged step.   │
+│  Cancel before any commit → wipes all state.       │
+│  Cancel after partial commit → relabelled "Close"  │
+│  and Commit Receipts remain visible.               │
+└────────────────────────────────────────────────────┘
+```
+
+---
+
+## Character Workshop
+
+The modal's Character Workshop has three tabs sharing a single `_cardSuggestions` array:
+
+```
+AI card-audit call
+  └── raw text
+        ├── AI Raw tab     — displays raw text verbatim (<pre>)
+        ├── Ingester tab   — parses via parseCardSuggestions()
+        │     └── _cardSuggestions[{ header, content, reason, _applied }]
+        │           │
+        │           ├── dropdown populated from _cardSuggestions
+        │           ├── renderIngesterDetail():
+        │           │     parseDescriptionSections(Draft Bio)
+        │           │       → match section by header + occurrence index
+        │           │       → show Current Draft / AI Suggestion side by side
+        │           └── Apply → applyDescriptionSection() patches Draft Bio textarea
+        │
+        └── Draft Bio tab  — editable textarea, seeded from _originalDescription
+              ├── Revert to Original → resets to _originalDescription
+              └── Regen Warning banner when draft modified since last regen
+```
+
+### Description Section Parsing
+
+`parseDescriptionSections(text)` produces an ordered list of `{ header, index, headerLine, startLine, endLine }` objects. The helpers it relies on:
+
+| Helper | Purpose |
+|---|---|
+| `isDecoratorLine(line)` | True for lines containing only `-`, `*`, `━`, spaces |
+| `stripHeaderDecorators(line)` | Removes leading/trailing `*`, `-`, `#`, `━`, `:` |
+| `isHeaderLine(line)` | Non-decorator line whose stripped text is 1–3 words |
+| `applyDescriptionSection(text, start, end, newContent)` | Replaces content lines in a description string |
+
+Ingester maps **nth suggestion for a given header** → **nth matching section in the bio**, so duplicate section headers are handled correctly.
 
 ---
 
@@ -167,22 +255,23 @@ ST Context
         │  two parallel LLM calls fire immediately on modal open
         ▼
   ┌─────────────────────────────────────────────────────┐
-  │  REVIEW STEP (single step)                          │
+  │  REVIEW STEP (Character Workshop + Situation)       │
   │                                                     │
   │  generateWithProfile(cardPrompt + description +     │
   │                       transcript)                   │
-  │    → suggestions box (read-only, regenerable)       │
+  │    → AI Raw tab (read-only)                         │
+  │    → Ingester tab (section-aware apply)             │
+  │    → Draft Bio textarea (user edits directly)       │
   │                                                     │
   │  generateWithProfile(situationPrompt + transcript   │
   │                       + priorSituation)             │
   │    → situation textarea (editable, regenerable)     │
   │                                                     │
-  │  description textarea (editable)                    │
   │  turns input (1–10, default 4)                      │
   │                                                     │
-  │  [Confirm]  [Update Lorebook]  [Cancel]             │
+  │  [Finalize]  [Update Lorebook]  [Cancel]            │
   └─────────────────────────────────────────────────────┘
-        │ confirm
+        │ Finalize
         ▼
   newDescription = cardText + SITUATION_SEP + situationText
 
@@ -191,26 +280,34 @@ ST Context
   — go back turnsToCarry * 2 messages
   — walk back to first AI reply
 
-  ── if _isChapterMode ──────────────────────────────────
-  saveCharacter(char, newDescription, _cloneName)
-    POST /api/characters/edit  (multipart, bumps name)
-  getCharacters() + selectCharacterById()
-  deriveChapterName(char.avatar)
-    POST /api/chats/search → max ch\d+ + 1
-  saveNewChat(freshChar, chapterName, chatMetadata, lastN)
-    POST /api/chats/save
-  openCharacterChat(chapterName)
+  ── Step 1 — Card Save ─────────────────────────────────
+  if _isChapterMode:
+    saveCharacter(char, newDescription, _cloneName)
+      POST /api/characters/edit  (multipart, bumps name)
+    _chapterName = deriveChapterName(char.avatar)
+    getCharacters() + selectCharacterById()
+  else:
+    _cloneAvatarUrl = createCharacterClone(char, "(Ch1)", newDescription)
+      POST /api/characters/create  (copies avatar blob)
+    getCharacters()
+    _chapterName = deriveChapterName(_cloneAvatarUrl)
+  persistChangelog(_chapterName)
 
-  ── else (base character) ───────────────────────────────
-  createCharacterClone(char, "(Ch1)", newDescription)
-    POST /api/characters/create  (copies avatar blob)
-    → returns new avatar filename
-  getCharacters()
-  deriveChapterName(newAvatarUrl)
-  saveNewChat(cloneChar, chapterName, chatMetadata, lastN)
+  ── Step 2 — Lorebook Save ─────────────────────────────
+  if _draftLorebook && _lorebookName:
+    lbSaveLorebook(_lorebookName, _draftLorebook)
+      POST /api/worldinfo/edit
+      emit WORLDINFO_UPDATED
+  else:
+    (skipped — no lorebook opened this session)
+
+  ── Step 3 — Chat Save ─────────────────────────────────
+  saveNewChat(freshChar, _chapterName, chatMetadata, lastN)
     POST /api/chats/save
-  selectCharacterById(newCharIdx)
-  openCharacterChat(chapterName)
+
+  ── Step 4 — Navigate ──────────────────────────────────
+  if !_isChapterMode: selectCharacterById(cloneIdx)
+  openCharacterChat(_chapterName)
 
   closeModal()
 ```
@@ -225,7 +322,11 @@ ST Context
   ├── lbEnsureLorebook(baseName)
   │     POST /api/worldinfo/list  → check existence
   │     POST /api/worldinfo/edit  → create if missing
-  │     POST /api/worldinfo/get   → load data into _lorebookData
+  │     POST /api/worldinfo/get   → load into _lorebookData
+  │
+  ├── deep-clone _lorebookData → _draftLorebook
+  │   (skipped on re-open if _draftLorebook already set —
+  │    preserves staged changes within the same session)
   │
   ├── showLbModal()
   │
@@ -235,18 +336,22 @@ ST Context
 Freeform tab:
   Raw AI output, fully editable.
 
-Ingester tab (parsed on tab switch):
+Ingester tab (parsed on tab switch from lbchz-freeform.val()):
   parseLbSuggestions(freeformText)
     → splits on **UPDATE:** / **NEW:** headers
     → extracts { type, name, keys, content, reason }
 
   Per-entry:
     [Apply Entry] → lbApplySuggestion()
-      UPDATE: mutate _lorebookData.entries[matched uid]
-      NEW / unmatched: insert at nextLorebookUid()
-      POST /api/worldinfo/edit + emit WORLDINFO_UPDATED
+      UPDATE: mutate _draftLorebook.entries[matched uid]  (memory only)
+      NEW / unmatched: insert at nextLorebookUid()         (memory only)
+      No server write — bulk commit on Finalize Step 2
 
-  [Apply All] → sequential loop over all suggestions
+  [Apply All] → sequential loop over all suggestions      (memory only)
+
+Finalize Step 2:
+  lbSaveLorebook(_lorebookName, _draftLorebook)
+    POST /api/worldinfo/edit + emit WORLDINFO_UPDATED
 ```
 
 ---
@@ -256,15 +361,32 @@ Ingester tab (parsed on tab switch):
 ```
 chz-overlay
 └── chz-modal
-    └── chz-step-2  (single review step — no step-1 in DOM)
-        ├── AI Suggested Tweaks  [spinner] [↻ regen]
-        │     chz-suggestions (read-only box, <pre> content)
-        ├── Character Description textarea  (editable)
+    └── chz-step-2  (single review step)
+        ├── Character Workshop  [spinner] [↻ regen]
+        │     [Dirty-draft warning banner]
+        │     Tab bar: [Draft Bio] [AI Raw] [Ingester]
+        │
+        │     Draft Bio panel
+        │       chz-card-text textarea  (editable)
+        │       [Revert to Original]
+        │
+        │     AI Raw panel
+        │       chz-suggestions-raw <pre> (read-only)
+        │
+        │     Ingester panel
+        │       Suggestion select dropdown
+        │       Current Draft textarea (read-only)
+        │       AI Suggestion textarea (editable)
+        │       No-match warning banner
+        │       [Apply]
+        │
         ├── Situation Summary  [spinner] [↻ regen]
         │     chz-situation-text textarea  (editable)
         ├── Turns input  (1–10)
         ├── Error banner
-        └── [Confirm]  [Update Lorebook]  [Cancel]
+        ├── [Finalize]  [Update Lorebook]  [Cancel / Close]
+        └── Commit Receipts panel (hidden until first Finalize attempt)
+              card row / lorebook row / chat row — each ✓ or ✗
 
 lbchz-overlay
 └── lbchz-modal
@@ -287,24 +409,33 @@ lbchz-overlay
 
 ## Session State
 
-Cleared at the start of each `onChapterizeClick()` invocation (and on `closeModal()`):
+Cleared at the start of each `onChapterizeClick()` invocation (and on `closeModal()`).  
+`_draftLorebook` is cleared on `closeModal()` but **not** between lorebook modal open/close within the same session, so staged lorebook changes survive re-opening the lorebook modal.
 
 | Variable | Purpose |
 |---|---|
 | `_transcript` | Filtered chat text fed to all LLM prompts |
 | `_originalDescription` | Description prose (situation block stripped) |
 | `_priorSituation` | Situation text from previous chapter |
-| `_suggestionsLoading` | Guards confirm button and spinner |
-| `_situationLoading` | Guards confirm button and spinner |
+| `_suggestionsLoading` | Guards Finalize button and spinner |
+| `_situationLoading` | Guards Finalize button and spinner |
 | `_isChapterMode` | true if active char already has `(ChX)` suffix |
-| `_nextChNum` | Chapter number to assign on confirm |
+| `_nextChNum` | Chapter number to assign on next chapterize |
 | `_cloneName` | Display name for the chapter card |
-| `_generationId` | Incremented each invocation; drops stale callbacks |
+| `_suggestionsGenId` | Incremented each suggestions call; drops stale callbacks |
+| `_situationGenId` | Incremented each situation call; drops stale callbacks |
+| `_lorebookGenId` | Incremented each lorebook call; drops stale callbacks |
+| `_cardSuggestions` | Parsed suggestion objects from last card AI call |
+| `_draftModifiedSinceRegen` | True if Draft Bio edited since last regen |
+| `_chapterName` | Derived chat file name (e.g. `ch2`); set during Step 1 |
+| `_cloneAvatarUrl` | Clone path only — avatar URL of the created clone |
+| `_finalizeSteps` | `{ cardSaved, lorebookSaved, chatSaved }` — step completion flags; reset only on fresh session, not between retry attempts |
 | `_lorebookName` | Base character name used as lorebook filename |
-| `_lorebookData` | `{entries:{}}` loaded from server; mutated on Apply |
+| `_lorebookData` | `{entries:{}}` server copy loaded on first lorebook open |
+| `_draftLorebook` | Working copy — deep clone of `_lorebookData`; Apply mutations staged here only |
 | `_lorebookLoading` | Guards lorebook spinner and regen button |
 
-`_generationId` is incremented on both `closeModal()` and each new invocation. All `.then()` callbacks guard with `if (_generationId !== genId) return` before touching the DOM.
+All three `*GenId` values are incremented on `closeModal()`. Every `.then()` callback guards with `if (_xxxGenId !== localId) return` before touching the DOM.
 
 ---
 
@@ -371,7 +502,7 @@ generateWithProfile(prompt)
                 uses globally active connection (pre-existing behaviour)
 ```
 
-The profile dropdown in Settings lists only `openai` (Chat Completion) and `textgenerationwebui` (Text Completion) profile types — the set supported by `ConnectionManagerRequestService`. Profiles using other API backends (kobold, novel.ai, etc.) remain usable via the global connection fallback.
+The profile dropdown in Settings lists only `openai` (Chat Completion) and `textgenerationwebui` (Text Completion) profile types — the set supported by `ConnectionManagerRequestService`. Profiles using other API backends remain usable via the global connection fallback.
 
 ---
 
@@ -382,13 +513,16 @@ The profile dropdown in Settings lists only `openai` (Chat Completion) and `text
 createCharacterClone()
         │
         ▼
-getCharacters()  ──►  findByAvatar  ──►  selectCharacterById()
+getCharacters()  ──►  findByAvatar(_cloneAvatarUrl)
         │
         ▼
-deriveChapterName()
+deriveChapterName(_cloneAvatarUrl)
         │
         ▼
 saveNewChat()
+        │
+        ▼
+selectCharacterById(cloneIdx)
         │
         ▼
 openCharacterChat()
@@ -399,9 +533,10 @@ openCharacterChat()
 saveCharacter()   (rename + description update)
         │
         ▼
-getCharacters()  ──►  findByAvatar  ──►  selectCharacterById()
-        │                                        │
-        │                   deriveChapterName() ─┘  (parallel, started early)
+deriveChapterName(char.avatar)
+        │
+        ▼
+getCharacters()  ──►  findByAvatar(char.avatar)  ──►  selectCharacterById()
         │
         ▼
 saveNewChat()
@@ -411,3 +546,5 @@ openCharacterChat()
 ```
 
 `openCharacterChat()` calls `createOrEditCharacter()` internally. Character save + select **must** complete before it is called or the card will be overwritten with stale state.
+
+**Retry safety:** each `_finalizeSteps` flag is only set after its server call succeeds. A retry re-enters `onConfirmClick()` and skips already-completed steps, so a network failure mid-sequence can be resolved by clicking Finalize again without duplicating work.

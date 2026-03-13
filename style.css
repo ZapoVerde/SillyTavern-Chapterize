@@ -409,6 +409,76 @@
     border-color: var(--chz-btn-primary-bg);
 }
 
+/* ─── Ingester Panels (side-by-side) ─────────────────────────────────────── */
+
+.chz-ingester-panels {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--chz-gap);
+}
+
+.chz-ingester-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0; /* prevent grid blowout */
+}
+
+/* ─── Left-aligned button row ────────────────────────────────────────────── */
+
+.chz-buttons-left {
+    justify-content: flex-start;
+}
+
+/* ─── Commit Receipts Panel ──────────────────────────────────────────────── */
+
+.chz-receipts {
+    border: 1px solid var(--chz-modal-border);
+    border-radius: var(--chz-input-radius);
+    padding: 10px 12px;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.chz-receipts-title {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--chz-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 8px;
+}
+
+.chz-receipts-content {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.chz-receipt-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.chz-receipt-item {
+    font-size: 0.83rem;
+    line-height: 1.4;
+}
+
+.chz-receipt-item.success {
+    color: #6bbf6b;
+}
+
+.chz-receipt-item.failure {
+    color: var(--chz-error-fg);
+}
+
+.chz-receipt-hint {
+    font-size: 0.76rem;
+    color: var(--chz-text-muted);
+    padding-left: 16px;
+}
+
 /* ─── Mobile ──────────────────────────────────────────────────────────────── */
 
 @media (max-width: 600px) {
@@ -424,5 +494,9 @@
 
     .chz-turns-row {
         flex-wrap: wrap;
+    }
+
+    .chz-ingester-panels {
+        grid-template-columns: 1fr;
     }
 }
