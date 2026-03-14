@@ -540,6 +540,38 @@
     padding-left: 16px;
 }
 
+/* ─── Step 4 RAG Panel ───────────────────────────────────────────────────── */
+
+.chz-rag-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.chz-rag-timeline {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    max-height: 116px;
+    overflow-y: auto;
+    padding: 5px 8px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--chz-modal-border);
+    border-radius: var(--chz-input-radius);
+}
+
+.chz-rag-item {
+    font-size: 0.8rem;
+    line-height: 1.5;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.chz-rag-item--existing  { color: var(--chz-text-muted); }
+.chz-rag-item--pending   { color: #6bbf6b; font-weight: 500; }
+.chz-rag-item--duplicate { color: var(--chz-warn-fg); font-weight: 500; }
+
 /* ─── Mobile ──────────────────────────────────────────────────────────────── */
 
 @media (max-width: 600px) {

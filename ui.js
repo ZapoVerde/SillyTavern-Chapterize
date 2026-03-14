@@ -1,21 +1,22 @@
 /**
  * @file data/default-user/extensions/chapterize/ui.js
  * @stamp {"utc":"2026-03-14T00:00:00.000Z"}
- * @architectural-role Modal HTML Builder
+ * @architectural-role HTML Builder
  * @description
- * Builds and returns the full HTML string for the Chapterize 4-step wizard
- * modal. Extracted from index.js to reduce file length.
- * The three numeric turn-count constants are received as parameters so this
- * module carries no imports and remains a pure HTML factory with no side
- * effects.
+ * Builds and returns HTML strings for the Chapterize wizard modal and the
+ * extensions settings panel. Extracted from index.js to reduce file length.
+ * All runtime values are received as parameters so this module carries no
+ * imports and remains a pure HTML factory with no side effects.
  * @core-principles
- * 1. OWNS only the static structure of the wizard modal; contains no logic.
+ * 1. OWNS only the static structure of the modal and settings panel; contains no logic.
  * 2. MUST NOT import from index.js or any ST module — caller passes all
  *    runtime values as arguments.
  * 3. IS NOT responsible for injecting the HTML into the DOM; that is done
- *    by injectModal() in index.js.
+ *    by injectModal() / injectSettingsPanel() in index.js.
  * @api-declaration
- * Exported symbols: buildModalHTML(minTurns, maxTurns, defaultTurns) → string
+ * Exported symbols:
+ *   buildModalHTML(minTurns, maxTurns, defaultTurns) → string
+ *   buildSettingsHTML(minTurns, maxTurns, settings, escapeHtml) → string
  * @contract
  *   assertions:
  *     purity: pure # No side effects; same inputs always produce same output.
@@ -204,6 +205,11 @@ export function buildModalHTML(minTurns, maxTurns, defaultTurns) {
         <div id="chz-step4-target"  class="chz-step4-row"></div>
         <div id="chz-step4-context" class="chz-step4-row"></div>
         <div id="chz-step4-lore"    class="chz-step4-row"></div>
+        <div id="chz-step4-rag" class="chz-rag-panel chz-hidden">
+          <span class="chz-label" data-i18n="chapterize.rag_panel_label">Narrative Memory (RAG)</span>
+          <div id="chz-rag-timeline" class="chz-rag-timeline"></div>
+          <div id="chz-rag-warning" class="chz-warn chz-hidden"></div>
+        </div>
       </div>
 
       <div id="chz-receipts" class="chz-receipts chz-hidden">
@@ -222,6 +228,117 @@ export function buildModalHTML(minTurns, maxTurns, defaultTurns) {
       <button id="chz-confirm"   class="chz-btn chz-btn-primary chz-hidden" data-i18n="chapterize.finalize">Finalize</button>
     </div>
 
+  </div>
+</div>`;
+}
+
+/**
+ * Returns the settings panel HTML for the Chapterize extension.
+ * @param {number} minTurns
+ * @param {number} maxTurns
+ * @param {object} settings  Current extension settings object (read-only).
+ * @param {Function} escapeHtml  HTML-escape utility passed from caller.
+ * @returns {string}
+ */
+export function buildSettingsHTML(minTurns, maxTurns, settings, escapeHtml) {
+    const s = settings;
+    return `
+<div class="chz-settings-block inline-drawer">
+  <div class="inline-drawer-toggle inline-drawer-header">
+    <b data-i18n="chapterize.settings_title">Chapterize</b>
+    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+  </div>
+  <div class="inline-drawer-content">
+    <div class="chz-settings-group">
+
+      <div class="chz-settings-row">
+        <label for="chz-set-turns" data-i18n="chapterize.settings_turns_label">Turns to carry over (default)</label>
+        <input id="chz-set-turns" type="number"
+               min="${minTurns}" max="${maxTurns}" value="${s.turnsN}">
+      </div>
+
+      <div class="chz-settings-row">
+        <label>
+          <input id="chz-set-changelog" type="checkbox" ${s.storeChangelog ? 'checked' : ''}>
+          <span data-i18n="chapterize.settings_store_changelog">Store changelog</span>
+        </label>
+      </div>
+
+      <div class="chz-settings-row">
+        <label>
+          <input id="chz-set-rag" type="checkbox" ${s.enableRag ? 'checked' : ''}>
+          <span data-i18n="chapterize.settings_enable_rag">Enable Narrative Memory (RAG)</span>
+        </label>
+        <small data-i18n="chapterize.settings_enable_rag_hint" style="opacity:0.7">On Finalize, upload the chapter transcript as a Data Bank file attached to the character. Requires a vector embedding source to be configured in SillyTavern.</small>
+      </div>
+
+      <div class="chz-settings-row">
+        <label for="chz-set-profile" data-i18n="chapterize.settings_profile_label">Connection Profile</label>
+        <select id="chz-set-profile" class="text_pole"></select>
+        <small data-i18n="chapterize.settings_profile_hint" style="opacity:0.7">Override the active connection for Chapterize AI calls. Leave on default to use the global connection.</small>
+      </div>
+
+      <div class="chz-settings-row">
+        <div class="chz-settings-label-row">
+          <label for="chz-set-prompt-card" data-i18n="chapterize.settings_card_prompt">Card/Suggestions prompt (before content)</label>
+          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
+                  data-target="chz-set-prompt-card" data-key="cardPrompt"
+                  data-i18n="chapterize.reset">Reset</button>
+        </div>
+        <textarea id="chz-set-prompt-card" class="chz-settings-textarea">${escapeHtml(s.cardPrompt)}</textarea>
+      </div>
+
+      <div class="chz-settings-row">
+        <div class="chz-settings-label-row">
+          <label for="chz-set-prompt-card-aft" data-i18n="chapterize.settings_card_prompt_aft">Card/Suggestions prompt (after content)</label>
+          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
+                  data-target="chz-set-prompt-card-aft" data-key="cardPromptAft"
+                  data-i18n="chapterize.reset">Reset</button>
+        </div>
+        <textarea id="chz-set-prompt-card-aft" class="chz-settings-textarea">${escapeHtml(s.cardPromptAft)}</textarea>
+      </div>
+
+      <div class="chz-settings-row">
+        <div class="chz-settings-label-row">
+          <label for="chz-set-prompt-situation" data-i18n="chapterize.settings_situation_prompt">Situation prompt (before content)</label>
+          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
+                  data-target="chz-set-prompt-situation" data-key="situationPrompt"
+                  data-i18n="chapterize.reset">Reset</button>
+        </div>
+        <textarea id="chz-set-prompt-situation" class="chz-settings-textarea">${escapeHtml(s.situationPrompt)}</textarea>
+      </div>
+
+      <div class="chz-settings-row">
+        <div class="chz-settings-label-row">
+          <label for="chz-set-prompt-situation-aft" data-i18n="chapterize.settings_situation_prompt_aft">Situation prompt (after content)</label>
+          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
+                  data-target="chz-set-prompt-situation-aft" data-key="situationPromptAft"
+                  data-i18n="chapterize.reset">Reset</button>
+        </div>
+        <textarea id="chz-set-prompt-situation-aft" class="chz-settings-textarea">${escapeHtml(s.situationPromptAft)}</textarea>
+      </div>
+
+      <div class="chz-settings-row">
+        <div class="chz-settings-label-row">
+          <label for="chz-set-prompt-lorebook" data-i18n="chapterize.settings_lorebook_prompt">Lorebook prompt (before content)</label>
+          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
+                  data-target="chz-set-prompt-lorebook" data-key="lorebookPrompt"
+                  data-i18n="chapterize.reset">Reset</button>
+        </div>
+        <textarea id="chz-set-prompt-lorebook" class="chz-settings-textarea">${escapeHtml(s.lorebookPrompt)}</textarea>
+      </div>
+
+      <div class="chz-settings-row">
+        <div class="chz-settings-label-row">
+          <label for="chz-set-prompt-lorebook-aft" data-i18n="chapterize.settings_lorebook_prompt_aft">Lorebook prompt (after content)</label>
+          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
+                  data-target="chz-set-prompt-lorebook-aft" data-key="lorebookPromptAft"
+                  data-i18n="chapterize.reset">Reset</button>
+        </div>
+        <textarea id="chz-set-prompt-lorebook-aft" class="chz-settings-textarea">${escapeHtml(s.lorebookPromptAft)}</textarea>
+      </div>
+
+    </div>
   </div>
 </div>`;
 }

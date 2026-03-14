@@ -1,6 +1,6 @@
 /**
  * @file data/default-user/extensions/chapterize/index.js
- * @stamp {"utc":"2026-03-13T00:00:00.000Z"}
+ * @stamp {"utc":"2026-03-14T00:00:00.000Z"}
  * @architectural-role Feature Entry Point
  * @description
  * SillyTavern extension that closes a roleplay chapter using a Draft/Commit
@@ -15,8 +15,10 @@
  * sequential server writes.
  * All edits are staged in memory. On Finalize, changes are committed sequentially:
  *   1. Character card (create clone or edit-in-place)
- *   2. Lorebook (deferred bulk write of _draftLorebook)
- *   3. New chapter chat (seeded with last N turns)
+ *   2. RAG upload (optional) — chapter transcript uploaded as a Data Bank file
+ *      and registered in extension_settings.character_attachments for the card
+ *   3. Lorebook (deferred bulk write of _draftLorebook)
+ *   4. New chapter chat (seeded with last N turns)
  * The Commit Receipts panel tracks step completion for safe retries. Cancel
  * before any commit wipes all state; Cancel after a partial commit relabels to
  * "Close" and keeps receipts visible.
@@ -30,18 +32,21 @@
  * @api-declaration
  * Side-effect module — no exported symbols.
  * Registers on load: Chapterize button in #extensionsMenu,
- *   settings panel in #extensions_settings, a hidden modal in <body>.
+ *   settings panel in #extensions_settings (HTML built by buildSettingsHTML in ui.js),
+ *   a hidden modal in <body> (HTML built by buildModalHTML in ui.js).
  * Entry point: onChapterizeClick() (bound to button).
  * Key internal APIs (Character Workshop): wordDiff, parseDescriptionSections,
  *   applyDescriptionSection, reparseSuggestions.
  * Key internal APIs (Lorebook Workshop): toVirtualDoc, makeLbDraftEntry,
  *   enrichLbSuggestions, updateLbDiff, onLbIngesterApply, onLbApplyAllUnresolved.
+ * Key internal APIs (Narrative Memory / RAG): buildProsePairs, buildRagDocument,
+ *   uploadRagFile, registerCharacterAttachment.
  * @contract
  *   assertions:
  *     purity: mutates # Modifies module-level session state on each invocation.
- *     state_ownership: [_transcript, _originalDescription, _cardSuggestions,
- *       _ingesterSnapshot, _ingesterDebounceTimer, _activeIngesterIndex,
- *       _chapterName, _cloneAvatarUrl, _finalizeSteps,
+ *     state_ownership: [_transcript, _originalDescription, _stagedProsePairs,
+ *       _cardSuggestions, _ingesterSnapshot, _ingesterDebounceTimer,
+ *       _activeIngesterIndex, _chapterName, _cloneAvatarUrl, _finalizeSteps,
  *       _suggestionsGenId, _situationGenId, _lorebookGenId,
  *       _lorebookName, _lorebookData, _draftLorebook, _lorebookLoading,
  *       _lorebookSuggestions, _lbActiveIngesterIndex, _lbDebounceTimer,
@@ -58,7 +63,7 @@ import { extension_settings } from '../../../extensions.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
 import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
 import { ConnectionManagerRequestService } from '../../shared.js';
-import { buildModalHTML } from './ui.js';
+import { buildModalHTML, buildSettingsHTML } from './ui.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -163,6 +168,7 @@ Keys line. The *Reason:* line closes each block. Leave one blank line between bl
 const SETTINGS_DEFAULTS = Object.freeze({
     turnsN:              DEFAULT_TURNS_N,
     storeChangelog:      true,
+    enableRag:           false,
     profileId:           null,
     cardPrompt:          DEFAULT_CARD_PROMPT,
     cardPromptAft:       DEFAULT_CARD_PROMPT_AFT,
@@ -179,6 +185,7 @@ const SETTINGS_DEFAULTS = Object.freeze({
 let _transcript              = '';
 let _originalDescription     = '';
 let _priorSituation          = '';
+let _stagedProsePairs        = [];  // [{user: msg, ai: msg}] built on click, used at Finalize
 let _suggestionsLoading      = false;
 let _situationLoading        = false;
 let _isChapterMode           = false;   // true when current char already has a (ChX) suffix
@@ -203,6 +210,7 @@ let _cloneAvatarUrl          = '';      // clone path only: avatar URL of the cr
 // Step completion flags — reset only on fresh session start, NOT between retry attempts
 const _finalizeSteps = {
     cardSaved:     false,
+    ragSaved:      false,
     lorebookSaved: false,
     chatSaved:     false,
 };
@@ -255,6 +263,107 @@ function buildTranscript(messages) {
         .filter(m => !m.is_system)
         .map(m => `${m.name}: ${m.mes}`)
         .join('\n');
+}
+
+// ─── Narrative Memory (RAG) ───────────────────────────────────────────────────
+
+/**
+ * Pairs user+AI messages from a chat into turn objects.
+ * Skips system messages. Only complete user→AI pairs are included.
+ * @param {object[]} messages
+ * @returns {{user: object, ai: object}[]}
+ */
+function buildProsePairs(messages) {
+    const valid = messages.filter(m => !m.is_system && m.mes !== undefined);
+    const pairs = [];
+    for (let i = 0; i < valid.length - 1; i++) {
+        if (valid[i].is_user && !valid[i + 1].is_user) {
+            pairs.push({ user: valid[i], ai: valid[i + 1] });
+        }
+    }
+    return pairs;
+}
+
+/**
+ * Builds the RAG document: one situation-summary chunk followed by per-turn-pair
+ * chunks, each prefixed with a short context line. Chunks are separated by `\n\n`
+ * so SillyTavern's recursive splitter treats each as a discrete boundary.
+ * Uses a sliding window of 2 pairs (stride 1) for overlap continuity.
+ * @param {string} situationText  Finalized Situation Summary text.
+ * @param {{user: object, ai: object}[]} pairs
+ * @returns {string}
+ */
+function buildRagDocument(situationText, pairs) {
+    if (!pairs.length) return situationText || '';
+    const chunks = [];
+    // Chunk 0: full situation summary (retrieved for narrative-state queries)
+    if (situationText) chunks.push(situationText);
+    // Short one-line context prefix for every turn chunk (truncated to stay under chunk_size_db)
+    const contextLine = situationText
+        ? `[Context: ${situationText.slice(0, 250).replace(/\n/g, ' ')}]`
+        : '';
+    // Sliding window of 2 pairs, stride 1; last window may be 1 pair
+    for (let i = 0; i < pairs.length; i++) {
+        const window = pairs.slice(i, i + 2);
+        const turnText = window
+            .map(p => `${p.user.name}: ${p.user.mes}\n${p.ai.name}: ${p.ai.mes}`)
+            .join('\n');
+        chunks.push(contextLine ? `${contextLine}\n${turnText}` : turnText);
+    }
+    return chunks.join('\n\n');
+}
+
+/**
+ * UTF-8–safe base64 encoding for the /api/files/upload payload.
+ * @param {string} str
+ * @returns {string}
+ */
+function utf8ToBase64(str) {
+    const bytes = new TextEncoder().encode(str);
+    const binary = Array.from(bytes, b => String.fromCharCode(b)).join('');
+    return btoa(binary);
+}
+
+/**
+ * Uploads a text string to the ST Data Bank as a plain-text file.
+ * @param {string} text     Full document content.
+ * @param {string} fileName Desired filename (e.g. "Seraphina (Ch1).txt").
+ * @returns {Promise<string>} The server-assigned URL for the uploaded file.
+ */
+async function uploadRagFile(text, fileName) {
+    const res = await fetch('/api/files/upload', {
+        method:  'POST',
+        headers: getRequestHeaders(),
+        body:    JSON.stringify({ name: fileName, data: utf8ToBase64(text) }),
+    });
+    if (!res.ok) throw new Error(`RAG file upload failed (HTTP ${res.status})`);
+    const json = await res.json();
+    if (!json.path) throw new Error('RAG file upload returned no path');
+    return json.path;
+}
+
+/**
+ * Registers a Data Bank file as a character attachment so ST's vector engine
+ * picks it up during generation. Mirrors the FileAttachment typedef from chats.js.
+ * @param {string} avatarKey  character.avatar of the target card.
+ * @param {string} url        File URL returned by uploadRagFile.
+ * @param {string} fileName   Human-readable file name.
+ * @param {number} byteSize   Byte length of the uploaded text.
+ */
+function registerCharacterAttachment(avatarKey, url, fileName, byteSize) {
+    if (!extension_settings.character_attachments) {
+        extension_settings.character_attachments = {};
+    }
+    if (!Array.isArray(extension_settings.character_attachments[avatarKey])) {
+        extension_settings.character_attachments[avatarKey] = [];
+    }
+    extension_settings.character_attachments[avatarKey].push({
+        url,
+        size:    byteSize,
+        name:    fileName,
+        created: Date.now(),
+    });
+    saveSettingsDebounced();
 }
 
 // ─── Prompt Interpolation ─────────────────────────────────────────────────────
@@ -970,6 +1079,7 @@ function closeModal() {
     _transcript              = '';
     _originalDescription     = '';
     _priorSituation          = '';
+    _stagedProsePairs        = [];
     _cardSuggestions         = [];
     _ingesterSnapshot        = '';
     clearTimeout(_ingesterDebounceTimer);
@@ -983,6 +1093,7 @@ function closeModal() {
     _nextChNum               = 1;
     _cloneName               = '';
     _finalizeSteps.cardSaved     = false;
+    _finalizeSteps.ragSaved      = false;
     _finalizeSteps.lorebookSaved = false;
     _finalizeSteps.chatSaved     = false;
     _lorebookName    = '';
@@ -1073,6 +1184,7 @@ function populateStep4Summary() {
     $('#chz-step4-target').text(`Target: ${_cloneName} (${mode})`);
     $('#chz-step4-context').text(`Context: ${lastN.length} messages being carried (${turnsToCarry} turns)`);
     $('#chz-step4-lore').text(`Lore: ${loreLabel} staged for update/creation${pendingText}`);
+    populateRagPanel();
 }
 
 /**
@@ -1967,6 +2079,7 @@ async function onChapterizeClick() {
     _originalDescription = sepIdx !== -1 ? raw.slice(0, sepIdx) : raw;
     _priorSituation      = sepIdx !== -1 ? raw.slice(sepIdx + SITUATION_SEP.length).trim() : '';
     _transcript          = buildTranscript(messages);
+    _stagedProsePairs    = buildProsePairs(messages);
 
     initWizardSession();
     showModal();
@@ -2133,7 +2246,34 @@ async function onConfirmClick() {
         }
     }
 
-    // ── Step 2: Lorebook Save ──────────────────────────────────────────────────
+    // ── Step 2: RAG Upload ─────────────────────────────────────────────────────
+    if (getSettings().enableRag && !_finalizeSteps.ragSaved) {
+        try {
+            const situationText = $('#chz-situation-text').val().trim();
+            const ragText       = buildRagDocument(situationText, _stagedProsePairs);
+            const ragFileName   = `${_cloneName}.txt`;
+            const ragUrl        = await uploadRagFile(ragText, ragFileName);
+            // After card save, _cloneAvatarUrl is set for clone mode; chapter mode keeps char.avatar
+            const ragAvatarKey  = _isChapterMode ? char.avatar : _cloneAvatarUrl;
+            const ragByteSize   = new TextEncoder().encode(ragText).length;
+            registerCharacterAttachment(ragAvatarKey, ragUrl, ragFileName, ragByteSize);
+            _finalizeSteps.ragSaved = true;
+            const totalLinked = (extension_settings.character_attachments?.[ragAvatarKey] ?? []).length;
+            upsertReceiptItem('chz-receipt-rag', receiptSuccess(
+                `Narrative Memory saved: "${ragFileName}" (${_stagedProsePairs.length} turns)`,
+                `${totalLinked} Data Bank file${totalLinked !== 1 ? 's' : ''} now linked to this character`,
+            ));
+        } catch (err) {
+            upsertReceiptItem('chz-receipt-rag', receiptFailure(`RAG save failed: ${err.message}`));
+            $('#chz-error-4')
+                .text(`Character card saved — RAG upload failed: ${err.message}`)
+                .removeClass('chz-hidden');
+            $('#chz-confirm, #chz-cancel, #chz-move-back').prop('disabled', false);
+            return;
+        }
+    }
+
+    // ── Step 3: Lorebook Save ──────────────────────────────────────────────────
     if (!_finalizeSteps.lorebookSaved) {
         if (_draftLorebook && _lorebookName) {
             try {
@@ -2163,7 +2303,7 @@ async function onConfirmClick() {
                     `Lorebook save failed: ${err.message}`,
                 ));
                 $('#chz-error-4')
-                    .text(`Character card already saved — lorebook write failed: ${err.message}`)
+                    .text(`Character card (and RAG) already saved — lorebook write failed: ${err.message}`)
                     .removeClass('chz-hidden');
                 $('#chz-confirm, #chz-cancel, #chz-move-back').prop('disabled', false);
                 return;
@@ -2175,7 +2315,7 @@ async function onConfirmClick() {
         }
     }
 
-    // ── Step 3: Chat Save ──────────────────────────────────────────────────────
+    // ── Step 4: Chat Save ──────────────────────────────────────────────────────
     if (!_finalizeSteps.chatSaved) {
         try {
             const freshCtx   = SillyTavern.getContext();
@@ -2194,14 +2334,14 @@ async function onConfirmClick() {
                 `Chat save failed — retry will attempt this step only`,
             ));
             $('#chz-error-4')
-                .text(`Character card and lorebook already saved — chat creation failed: ${err.message}`)
+                .text(`Character card, RAG, and lorebook already saved — chat creation failed: ${err.message}`)
                 .removeClass('chz-hidden');
             $('#chz-confirm, #chz-cancel, #chz-move-back').prop('disabled', false);
             return;
         }
     }
 
-    // ── Step 4: Navigate ───────────────────────────────────────────────────────
+    // ── Step 5: Navigate ───────────────────────────────────────────────────────
     try {
         // For clone mode: switch active character to the new clone before opening chat
         if (!_isChapterMode && _cloneAvatarUrl) {
@@ -2230,99 +2370,68 @@ function escapeHtml(str) {
         .replace(/"/g, '&quot;');
 }
 
-function buildSettingsHtml() {
-    const s = getSettings();
-    return `
-<div class="chz-settings-block inline-drawer">
-  <div class="inline-drawer-toggle inline-drawer-header">
-    <b data-i18n="chapterize.settings_title">Chapterize</b>
-    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
-  </div>
-  <div class="inline-drawer-content">
-    <div class="chz-settings-group">
+/** Escapes a string for safe embedding in a RegExp pattern. */
+function escapeRegex(str) {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
-      <div class="chz-settings-row">
-        <label for="chz-set-turns" data-i18n="chapterize.settings_turns_label">Turns to carry over (default)</label>
-        <input id="chz-set-turns" type="number"
-               min="${MIN_TURNS}" max="${MAX_TURNS}" value="${s.turnsN}">
-      </div>
+/**
+ * Populates the #chz-step4-rag panel from the current character's
+ * extension_settings.character_attachments. Read-only — no server writes.
+ * Shows existing chapterize files, the pending entry, and any warnings
+ * (duplicate filename, gap in chapter sequence).
+ */
+function populateRagPanel() {
+    if (!getSettings().enableRag) {
+        $('#chz-step4-rag').addClass('chz-hidden');
+        return;
+    }
 
-      <div class="chz-settings-row">
-        <label>
-          <input id="chz-set-changelog" type="checkbox" ${s.storeChangelog ? 'checked' : ''}>
-          <span data-i18n="chapterize.settings_store_changelog">Store changelog</span>
-        </label>
-      </div>
+    const context  = SillyTavern.getContext();
+    const char     = context.characters[context.characterId];
+    const pending  = `${_cloneName}.txt`;
+    const basePat  = new RegExp(`^${escapeRegex(_lorebookName)} \\(Ch(\\d+)\\)\\.txt$`, 'i');
 
-      <div class="chz-settings-row">
-        <label for="chz-set-profile" data-i18n="chapterize.settings_profile_label">Connection Profile</label>
-        <select id="chz-set-profile" class="text_pole"></select>
-        <small data-i18n="chapterize.settings_profile_hint" style="opacity:0.7">Override the active connection for Chapterize AI calls. Leave on default to use the global connection.</small>
-      </div>
+    // Gather chapterize-pattern files from the source character's Data Bank attachments
+    const allAttachments = extension_settings.character_attachments?.[char?.avatar] ?? [];
+    const existing = allAttachments
+        .filter(a => basePat.test(a.name))
+        .sort((a, b) => {
+            const na = Number(a.name.match(basePat)?.[1] ?? 0);
+            const nb = Number(b.name.match(basePat)?.[1] ?? 0);
+            return na - nb;
+        });
 
-      <div class="chz-settings-row">
-        <div class="chz-settings-label-row">
-          <label for="chz-set-prompt-card" data-i18n="chapterize.settings_card_prompt">Card/Suggestions prompt (before content)</label>
-          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
-                  data-target="chz-set-prompt-card" data-key="cardPrompt"
-                  data-i18n="chapterize.reset">Reset</button>
-        </div>
-        <textarea id="chz-set-prompt-card" class="chz-settings-textarea">${escapeHtml(s.cardPrompt)}</textarea>
-      </div>
+    const isDuplicate = existing.some(a => a.name === pending);
 
-      <div class="chz-settings-row">
-        <div class="chz-settings-label-row">
-          <label for="chz-set-prompt-card-aft" data-i18n="chapterize.settings_card_prompt_aft">Card/Suggestions prompt (after content)</label>
-          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
-                  data-target="chz-set-prompt-card-aft" data-key="cardPromptAft"
-                  data-i18n="chapterize.reset">Reset</button>
-        </div>
-        <textarea id="chz-set-prompt-card-aft" class="chz-settings-textarea">${escapeHtml(s.cardPromptAft)}</textarea>
-      </div>
+    // Build the timeline list
+    const rows = existing.map(a => {
+        if (a.name === pending) {
+            return `<div class="chz-rag-item chz-rag-item--duplicate">\u26a0 ${escapeHtml(a.name.replace(/\.txt$/i, ''))}</div>`;
+        }
+        return `<div class="chz-rag-item chz-rag-item--existing">\u2713 ${escapeHtml(a.name.replace(/\.txt$/i, ''))}</div>`;
+    });
+    rows.push(`<div class="chz-rag-item chz-rag-item--pending">+ ${escapeHtml(pending.replace(/\.txt$/i, ''))} (Pending)</div>`);
+    $('#chz-rag-timeline').html(rows.join(''));
 
-      <div class="chz-settings-row">
-        <div class="chz-settings-label-row">
-          <label for="chz-set-prompt-situation" data-i18n="chapterize.settings_situation_prompt">Situation prompt (before content)</label>
-          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
-                  data-target="chz-set-prompt-situation" data-key="situationPrompt"
-                  data-i18n="chapterize.reset">Reset</button>
-        </div>
-        <textarea id="chz-set-prompt-situation" class="chz-settings-textarea">${escapeHtml(s.situationPrompt)}</textarea>
-      </div>
+    // Warnings
+    const warnings = [];
+    if (isDuplicate) {
+        warnings.push(`"${pending}" already exists — Finalize will add a duplicate entry.`);
+    }
+    const existingNums = existing
+        .map(a => Number(a.name.match(basePat)?.[1]))
+        .filter(Boolean);
+    for (let n = 1; n < _nextChNum - 1; n++) {
+        if (!existingNums.includes(n)) warnings.push(`Ch ${n} is missing from this character's memory.`);
+    }
+    if (warnings.length) {
+        $('#chz-rag-warning').text(warnings.join(' ')).removeClass('chz-hidden');
+    } else {
+        $('#chz-rag-warning').addClass('chz-hidden');
+    }
 
-      <div class="chz-settings-row">
-        <div class="chz-settings-label-row">
-          <label for="chz-set-prompt-situation-aft" data-i18n="chapterize.settings_situation_prompt_aft">Situation prompt (after content)</label>
-          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
-                  data-target="chz-set-prompt-situation-aft" data-key="situationPromptAft"
-                  data-i18n="chapterize.reset">Reset</button>
-        </div>
-        <textarea id="chz-set-prompt-situation-aft" class="chz-settings-textarea">${escapeHtml(s.situationPromptAft)}</textarea>
-      </div>
-
-      <div class="chz-settings-row">
-        <div class="chz-settings-label-row">
-          <label for="chz-set-prompt-lorebook" data-i18n="chapterize.settings_lorebook_prompt">Lorebook prompt (before content)</label>
-          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
-                  data-target="chz-set-prompt-lorebook" data-key="lorebookPrompt"
-                  data-i18n="chapterize.reset">Reset</button>
-        </div>
-        <textarea id="chz-set-prompt-lorebook" class="chz-settings-textarea">${escapeHtml(s.lorebookPrompt)}</textarea>
-      </div>
-
-      <div class="chz-settings-row">
-        <div class="chz-settings-label-row">
-          <label for="chz-set-prompt-lorebook-aft" data-i18n="chapterize.settings_lorebook_prompt_aft">Lorebook prompt (after content)</label>
-          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
-                  data-target="chz-set-prompt-lorebook-aft" data-key="lorebookPromptAft"
-                  data-i18n="chapterize.reset">Reset</button>
-        </div>
-        <textarea id="chz-set-prompt-lorebook-aft" class="chz-settings-textarea">${escapeHtml(s.lorebookPromptAft)}</textarea>
-      </div>
-
-    </div>
-  </div>
-</div>`;
+    $('#chz-step4-rag').removeClass('chz-hidden');
 }
 
 function bindSettingsHandlers() {
@@ -2336,6 +2445,11 @@ function bindSettingsHandlers() {
 
     $('#chz-set-changelog').on('change', () => {
         getSettings().storeChangelog = $('#chz-set-changelog').is(':checked');
+        saveSettingsDebounced();
+    });
+
+    $('#chz-set-rag').on('change', () => {
+        getSettings().enableRag = $('#chz-set-rag').is(':checked');
         saveSettingsDebounced();
     });
 
@@ -2394,7 +2508,7 @@ function bindSettingsHandlers() {
 
 function injectSettingsPanel() {
     if ($('.chz-settings-block').length) return;
-    $('#extensions_settings').append(buildSettingsHtml());
+    $('#extensions_settings').append(buildSettingsHTML(MIN_TURNS, MAX_TURNS, getSettings(), escapeHtml));
     bindSettingsHandlers();
 }
 
