@@ -247,9 +247,9 @@
 }
 
 .chz-wizard-footer {
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
-    padding-top: var(--chz-gap-sm);
-    margin-top: var(--chz-gap-sm);
+    border-top: 1px solid var(--chz-modal-border);
+    padding-top: var(--chz-gap);
+    margin-top: var(--chz-gap);
 }
 
 .chz-btn {

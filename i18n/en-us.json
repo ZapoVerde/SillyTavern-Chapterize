@@ -23,7 +23,7 @@
     "chapterize.tab_freeform":                 "Freeform",
     "chapterize.lb_freeform_placeholder":      "AI suggestions appear here. Edit freely before switching to Update.",
     "chapterize.lb_ingester_next_title":       "Jump to next unresolved suggestion",
-    "chapterize.lb_ingester_diff_label":       "Diff (draft → edit)",
+    "chapterize.lb_ingester_diff_label":       "Changes",
     "chapterize.lb_editor_name_label":         "Name",
     "chapterize.keys_label":                   "Keys (comma-separated)",
     "chapterize.lb_content_label":             "Content",
