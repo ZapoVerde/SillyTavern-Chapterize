@@ -331,12 +331,21 @@ function utf8ToBase64(str) {
  * @returns {Promise<string>} The server-assigned URL for the uploaded file.
  */
 async function uploadRagFile(text, fileName) {
+    const formData = new FormData();
+    formData.append('file', new Blob([text], { type: 'text/plain' }), fileName);
+
+    const headers = getRequestHeaders();
+    delete headers['Content-Type'];
+
     const res = await fetch('/api/files/upload', {
         method:  'POST',
-        headers: getRequestHeaders(),
-        body:    JSON.stringify({ name: fileName, data: utf8ToBase64(text) }),
+        headers: headers,
+        body:    formData,
     });
-    if (!res.ok) throw new Error(`RAG file upload failed (HTTP ${res.status})`);
+    if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(`RAG file upload failed (HTTP ${res.status}): ${errorText}`);
+    }
     const json = await res.json();
     if (!json.path) throw new Error('RAG file upload returned no path');
     return json.path;

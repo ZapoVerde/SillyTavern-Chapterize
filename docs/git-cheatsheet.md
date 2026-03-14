@@ -1,117 +1,103 @@
-### Git + Firebase Cheatsheet
+This updated cheatsheet incorporates the specific safety checks and remote cleanup commands we just used. I've added a **"Proactive Cleanup"** section to help you identify which branches are safe to kill before you even try.
 
-#### 1. Basic Branch Navigation (Switch without affecting other branches)
-- Show current branch:  
-  `git branch --show-current`  
-  or check your prompt
+### Git + Firebase Cheatsheet (Updated)
 
-- List all local branches:  
-  `git branch`  (current has `*`)
+#### 1. Basic Branch Navigation & Syncing
+- **Show current branch:**  
+  `git branch --show-current`
 
-- Switch to existing branch:  
-  `git checkout <branch-name>`  
-  `git switch <branch-name>`  ← recommended
+- **List all local branches:**  
+  `git branch` (current has `*`)
 
-- Quick check after switch:  
-  `git status`  
-  `git log --oneline -5`
+- **Switch to branch:**  
+  `git switch <branch-name>`
 
-#### 2. Creating a New Branch from Another Branch
-- From current branch:  
+- **Sync with GitHub (Update all references):**  
+  `git fetch --all`
+
+- **Sync & Prune (Remove local "ghost" references to deleted remote branches):**  
+  `git fetch --prune` ← *Highly recommended for keeping your list clean.*
+
+#### 2. Creating a New Branch
+- **From current branch:**  
   `git switch -c new-branch`
 
-- From specific branch:  
-  `git switch -c new-branch main`  
-  `git checkout -b new-branch origin/main`
+- **From a specific branch (e.g., main):**  
+  `git switch -c new-branch main`
 
-#### 3. Typical Hotfix Flow
+#### 3. Typical Hotfix/Feature Flow
 ```bash
-# Start on production
-git checkout main
+# 1. Start fresh on main
+git switch main
 git pull origin main
 
-# Create & work on hotfix
-git checkout -b main-fix
-# ... fix, commit
-git add . && git commit -m "Fix ..."
-git push origin main-fix
+# 2. Create & work on fix
+git switch -c branch-fix
+# ... work, add, commit
+git push origin branch-fix
 
-# Switch back to feature
-git switch feature/ui_contract
-# ... continue feature work
-
-# Later return to hotfix
-git switch main-fix
+# 3. Switch back to your main project
+git switch feature/vectorize
 ```
 
-#### 4. Merging Branches (Get fix into production)
-**Fast-forward (clean linear history – what you did):**
+#### 4. Merging & Updating
+**Fast-forward (The "No-Merge-Commit" way):**
 ```bash
-git checkout main
+git switch main
 git pull origin main
-git merge --ff-only main-fix
+git merge --ff-only branch-fix
 git push origin main
 ```
 
-**Regular merge (with merge commit):**
+**Via Pull Request (GitHub UI):**
+1. `git push origin branch-fix`
+2. Open PR on GitHub → Merge.
+3. Use the "Delete branch" button on GitHub after merging.
+
+#### 5. Branch Cleanup (The "Safety First" Method)
+Always try the safe delete (`-d`) first. Git will stop you if you're about to lose unmerged work.
+
+**Identify what is safe to delete:**
+- `git branch --merged main` (Lists branches already fully integrated into main)
+
+**Execute local cleanup:**
 ```bash
-git checkout main
-git pull origin main
-git merge main-fix
-git push origin main
+# Safe delete (fails if not merged)
+git branch -d branch-name
+
+# Force delete (use ONLY if you want to trash the code)
+git branch -D branch-name
 ```
 
-**Via Pull Request (for review):**
-- `git push origin main-fix`
-- GitHub → New PR: base `main` ← compare `main-fix`
-- Review → Merge → Delete branch (UI button)
-
-#### 5. Clean Up Branches (After successful merge & deploy)
-Once the fix is live on prod and verified:
-
+**Execute remote cleanup:**
 ```bash
-# Delete local branch
-git branch -d main-fix          # safe if already merged
-# or force if needed (rare):
-# git branch -D main-fix
-
-# Delete remote branch
-git push origin --delete main-fix
-# or shorthand:
-# git push origin :main-fix
+# Remove the branch from GitHub
+git push origin --delete branch-name
 ```
-
-**Tip**: If Git says the branch isn't fully merged, double-check with `git branch --merged` or just use `-D` (but only if you're sure).
 
 #### 6. Firebase Project Switching & Deploy
-- Switch to production:  
-  `firebase use prod`  
-  `firebase use default`  (same project)
+- **Switch project:**  
+  `firebase use prod` or `firebase use dev`
 
-- Switch to dev:  
-  `firebase use dev`
-
-- Check current:  
+- **Check active project:**  
   `firebase use`
 
-- Build & deploy:  
+- **Build & Deploy:**  
   `npm run build`  
-  `firebase deploy --only hosting`  
-  `firebase deploy --project prod`  (one-shot, no switch needed)
+  `firebase deploy --only hosting`
 
-#### Quick Reference Table (Updated)
+---
 
-| Goal                              | Command(s)                                      | Notes |
-|-----------------------------------|-------------------------------------------------|-------|
-| Switch branches                   | `git switch <branch>`                           | Safe, no side effects |
-| Create branch from current        | `git switch -c new-branch`                      | Starts from current HEAD |
-| Create branch from specific       | `git switch -c new-branch main`                 | Doesn't change current branch |
-| Merge branch (fast-forward)       | `git merge --ff-only other-branch`              | Clean history if possible |
-| Push after merge                  | `git push origin main`                          | Makes fix live on remote |
-| Delete local branch (after merge) | `git branch -d branch-name`                     | Safe; use -D to force |
-| Delete remote branch              | `git push origin --delete branch-name`          | Cleanup remote |
-| Switch Firebase project           | `firebase use prod` / `firebase use dev`        | Affects deploy target |
-| Deploy to current project         | `firebase deploy --only hosting`                | After build |
-| Force deploy to specific project  | `firebase deploy --project prod`                | No alias switch needed |
+### Quick Reference Table (Updated)
 
-This now covers the full lifecycle: create → fix → merge → push → deploy → **clean up branches**.
+| Goal | Command | Why/Notes |
+| :--- | :--- | :--- |
+| **Switch** | `git switch <branch>` | Move between tasks |
+| **Sync List** | `git fetch --prune` | Clears "deleted" branches from your local list |
+| **Check Safety** | `git branch --merged` | See what is 100% safe to delete |
+| **Delete Local** | `git branch -d <name>` | **Safe:** Won't delete unmerged work |
+| **Force Delete** | `git branch -D <name>` | **Dangerous:** Deletes even if NOT merged |
+| **Delete Remote**| `git push origin --delete <name>` | Cleans up the GitHub UI list |
+| **Merge (Clean)** | `git merge --ff-only <name>`| Keeps history linear (no merge bubble) |
+| **FB Switch** | `firebase use <alias>` | Changes the target for `firebase deploy` |
+| **FB Deploy** | `firebase deploy` | Deploys based on current `firebase use` |
