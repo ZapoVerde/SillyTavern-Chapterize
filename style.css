@@ -489,7 +489,7 @@
 .chz-select-with-nav {
     display: flex;
     gap: var(--chz-gap-sm);
-    align-items: center;
+    align-items: stretch;
 }
 
 .chz-select-with-nav .chz-select {

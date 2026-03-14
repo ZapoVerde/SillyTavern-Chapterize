@@ -332,7 +332,7 @@ function utf8ToBase64(str) {
  */
 async function uploadRagFile(text, fileName) {
     const formData = new FormData();
-    formData.append('file', new Blob([text], { type: 'text/plain' }), fileName);
+    formData.append('upload', new Blob([text], { type: 'text/plain' }), fileName);
 
     const headers = getRequestHeaders();
     delete headers['Content-Type'];

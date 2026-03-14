@@ -44,8 +44,7 @@ git switch -c feature/my-new-task
 
 # 3. THE WORK LOOP (Repeat as needed)
 git status
-git add .
-git commit -m "Added the new login logic"
+git add . && git commit -m "Added the new login logic"
 
 # 4. Upload to GitHub
 git push origin feature/my-new-task
