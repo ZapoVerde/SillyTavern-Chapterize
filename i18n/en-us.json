@@ -3,7 +3,7 @@
     "chapterize.pending_warning":              "Changes pending — some suggestions not yet applied.",
     "chapterize.tab_bio":                      "Draft Bio",
     "chapterize.tab_raw":                      "AI Raw",
-    "chapterize.tab_ingester":                 "Ingester",
+    "chapterize.tab_update":                   "Update",
     "chapterize.revert_bio":                   "Revert to Original",
     "chapterize.suggestion_label":             "Suggestion",
     "chapterize.ingester_next_title":          "Jump to next unresolved suggestion",
