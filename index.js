@@ -7,9 +7,9 @@
  * architecture. On button click, opens a 4-step wizard modal and fires three
  * AI calls in the background: bio suggestions and situation summary fire
  * immediately; the lorebook AI call fires after the lorebook fetch resolves.
- * Steps: (1) Character Workshop — 3-tab bio editor (Draft Bio, AI Raw,
- * Ingester); (2) Situation Workshop — situation summary + turns slider;
- * (3) Lorebook Workshop — freeform AI output + diff-based ingester with
+ * Steps: (1) Character Workshop — 3-tab bio editor (Update, Draft Bio,
+ * AI Raw); (2) Situation Workshop — situation summary + turns slider;
+ * (3) Lorebook Workshop — diff-based Update tab with freeform AI output,
  * UID-anchored suggestions, Virtual Document diffing, and regen reconciliation;
  * (4) Review & Commit — pre-flight summary with pending-review guard and
  * sequential server writes.
@@ -996,13 +996,19 @@ function parseDescriptionSections(text) {
             startLine++;
         }
 
-        // Content ends before the next raw header line
+        // Content ends at the first blank line or the next header, whichever comes first
         const nextIdx = i + 1 < rawHeaders.length ? rawHeaders[i + 1].lineIdx : lines.length;
 
-        // Walk back past any leading decorator of the next section
-        let endLine = nextIdx - 1;
-        if (endLine >= startLine && isDecoratorLine(lines[endLine])) {
-            endLine--;
+        let endLine;
+        const firstBlank = lines.slice(startLine, nextIdx).findIndex(l => l.trim() === '');
+        if (firstBlank !== -1) {
+            endLine = startLine + firstBlank - 1;
+        } else {
+            // No blank line — walk back past any leading decorator of the next section
+            endLine = nextIdx - 1;
+            if (endLine >= startLine && isDecoratorLine(lines[endLine])) {
+                endLine--;
+            }
         }
 
         sections.push({ header, index, headerLine: lineIdx, startLine, endLine });
@@ -1153,7 +1159,7 @@ function initWizardSession() {
     _lorebookRawText  = '';
     _lorebookRawError = '';
 
-    onWorkshopTabSwitch('bio');
+    onWorkshopTabSwitch('ingester');
     setSuggestionsLoading(true);
     setSituationLoading(true);
     setLbLoading(true);

@@ -246,6 +246,12 @@
     justify-content: flex-end;
 }
 
+.chz-wizard-footer {
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    padding-top: var(--chz-gap-sm);
+    margin-top: var(--chz-gap-sm);
+}
+
 .chz-btn {
     padding: var(--chz-btn-pad);
     border-radius: var(--chz-btn-radius);

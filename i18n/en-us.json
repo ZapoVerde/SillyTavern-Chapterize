@@ -7,7 +7,7 @@
     "chapterize.revert_bio":                   "Revert to Original",
     "chapterize.suggestion_label":             "Suggestion",
     "chapterize.ingester_next_title":          "Jump to next unresolved suggestion",
-    "chapterize.ingester_diff_label":          "Diff (bio → edit)",
+    "chapterize.ingester_diff_label":          "Changes",
     "chapterize.ingester_edit_label":          "Edit",
     "chapterize.ingester_no_match":            "No matching section found in Draft Bio.",
     "chapterize.ingester_revert":              "Revert to AI",
@@ -21,7 +21,7 @@
 
     "chapterize.lorebook_title":               "Lorebook",
     "chapterize.tab_freeform":                 "Freeform",
-    "chapterize.lb_freeform_placeholder":      "AI suggestions appear here. Edit freely before switching to Ingester.",
+    "chapterize.lb_freeform_placeholder":      "AI suggestions appear here. Edit freely before switching to Update.",
     "chapterize.lb_ingester_next_title":       "Jump to next unresolved suggestion",
     "chapterize.lb_ingester_diff_label":       "Diff (draft → edit)",
     "chapterize.lb_editor_name_label":         "Name",

@@ -49,15 +49,15 @@ export function buildModalHTML(minTurns, maxTurns, defaultTurns) {
            data-i18n="chapterize.pending_warning">Changes pending — some suggestions not yet applied.</div>
 
       <div class="chz-tab-bar" id="chz-workshop-tab-bar">
-        <button class="chz-tab-btn chz-tab-active" data-tab="bio"
+        <button class="chz-tab-btn chz-tab-active" data-tab="ingester"
+                data-i18n="chapterize.tab_update">Update</button>
+        <button class="chz-tab-btn" data-tab="bio"
                 data-i18n="chapterize.tab_bio">Draft Bio</button>
         <button class="chz-tab-btn" data-tab="raw"
                 data-i18n="chapterize.tab_raw">AI Raw</button>
-        <button class="chz-tab-btn" data-tab="ingester"
-                data-i18n="chapterize.tab_ingester">Ingester</button>
       </div>
 
-      <div id="chz-tab-bio" class="chz-tab-panel">
+      <div id="chz-tab-bio" class="chz-tab-panel chz-hidden">
         <textarea id="chz-card-text" class="chz-textarea chz-textarea-tall" spellcheck="false"></textarea>
         <div class="chz-buttons chz-buttons-left">
           <button id="chz-revert-bio" class="chz-btn chz-btn-secondary chz-btn-sm"
@@ -66,12 +66,12 @@ export function buildModalHTML(minTurns, maxTurns, defaultTurns) {
       </div>
 
       <div id="chz-tab-raw" class="chz-tab-panel chz-hidden">
-        <span class="chz-info-icon" title="Any line with 1–3 words is treated as a section header. If a line is incorrectly detected as a header, add a word to make it 4+ words.">&#9432;</span>
+        <span class="chz-info-icon" title="Any line with 1–3 words is treated as a section header. If a line is incorrectly detected as a header, add a word to make it 4+ words. A blank line ends a section's content — only text up to the first blank line is captured. If a section is being cut off, remove the blank line inside it.">&#9432;</span>
         <textarea id="chz-suggestions-raw" class="chz-textarea chz-textarea-tall" spellcheck="false"></textarea>
         <div id="chz-raw-error" class="chz-error-banner chz-hidden"></div>
       </div>
 
-      <div id="chz-tab-ingester" class="chz-tab-panel chz-hidden">
+      <div id="chz-tab-ingester" class="chz-tab-panel">
         <div class="chz-settings-row">
           <label for="chz-ingester-select" data-i18n="chapterize.suggestion_label">Suggestion</label>
           <div class="chz-select-with-nav">
@@ -81,7 +81,7 @@ export function buildModalHTML(minTurns, maxTurns, defaultTurns) {
                     data-i18n="[title]chapterize.ingester_next_title">&#x27A1;</button>
           </div>
         </div>
-        <span class="chz-label" data-i18n="chapterize.ingester_diff_label">Diff (bio → edit)</span>
+        <span class="chz-label" data-i18n="chapterize.ingester_diff_label">Changes</span>
         <div id="chz-ingester-diff" class="chz-ingester-diff"></div>
         <span class="chz-label" data-i18n="chapterize.ingester_edit_label">Edit</span>
         <textarea id="chz-ingester-editor" class="chz-textarea" spellcheck="false"></textarea>
@@ -133,19 +133,19 @@ export function buildModalHTML(minTurns, maxTurns, defaultTurns) {
       </div>
 
       <div class="chz-tab-bar" id="lbchz-tab-bar">
-        <button id="lbchz-tab-btn-freeform" class="chz-tab-btn chz-tab-active" data-tab="freeform"
+        <button id="lbchz-tab-btn-ingester" class="chz-tab-btn chz-tab-active" data-tab="ingester"
+                data-i18n="chapterize.tab_update">Update</button>
+        <button id="lbchz-tab-btn-freeform" class="chz-tab-btn" data-tab="freeform"
                 data-i18n="chapterize.tab_freeform">Freeform</button>
-        <button id="lbchz-tab-btn-ingester" class="chz-tab-btn" data-tab="ingester"
-                data-i18n="chapterize.tab_ingester">Ingester</button>
       </div>
 
-      <div id="lbchz-tab-freeform" class="chz-tab-panel">
+      <div id="lbchz-tab-freeform" class="chz-tab-panel chz-hidden">
         <textarea id="lbchz-freeform" class="chz-textarea chz-textarea-tall" spellcheck="false"
                   data-i18n="[placeholder]chapterize.lb_freeform_placeholder"
-                  placeholder="AI suggestions appear here. Edit freely before switching to Ingester."></textarea>
+                  placeholder="AI suggestions appear here. Edit freely before switching to Update."></textarea>
       </div>
 
-      <div id="lbchz-tab-ingester" class="chz-tab-panel chz-hidden">
+      <div id="lbchz-tab-ingester" class="chz-tab-panel">
         <div class="chz-settings-row">
           <label for="lbchz-suggestion-select" data-i18n="chapterize.suggestion_label">Suggestion</label>
           <div class="chz-select-with-nav">
