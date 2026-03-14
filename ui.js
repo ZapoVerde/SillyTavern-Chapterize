@@ -222,10 +222,10 @@ export function buildModalHTML(minTurns, maxTurns, defaultTurns) {
 
     <!-- ── Shared Wizard Footer ── -->
     <div class="chz-buttons chz-wizard-footer">
-      <button id="chz-cancel"    class="chz-btn chz-btn-secondary" data-i18n="chapterize.cancel">Cancel</button>
+      <button id="chz-cancel"    class="chz-btn chz-btn-danger" data-i18n="chapterize.cancel">Cancel</button>
       <button id="chz-move-back" class="chz-btn chz-btn-secondary chz-hidden" data-i18n="chapterize.back">&lt; Back</button>
       <button id="chz-move-next" class="chz-btn chz-btn-secondary" data-i18n="chapterize.next">Next &gt;</button>
-      <button id="chz-confirm"   class="chz-btn chz-btn-primary chz-hidden" data-i18n="chapterize.finalize">Finalize</button>
+      <button id="chz-confirm"   class="chz-btn chz-btn-success chz-hidden" data-i18n="chapterize.finalize">Finalize</button>
     </div>
 
   </div>
