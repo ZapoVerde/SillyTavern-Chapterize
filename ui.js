@@ -423,6 +423,12 @@ export function buildSettingsHTML(minTurns, maxTurns, minLookback, maxLookback, 
           </div>
 
           <div class="chz-settings-row">
+            <label for="chz-set-rag-max-tokens" data-i18n="chapterize.settings_rag_max_tokens_label">Max Response Tokens</label>
+            <input id="chz-set-rag-max-tokens" type="number" min="1" value="${s.ragMaxTokens ?? 100}">
+            <small data-i18n="chapterize.settings_rag_max_tokens_hint" style="opacity:0.7">Maximum tokens the AI may produce for each chunk classification call. Lower values cap runaway outputs; raise this if responses are being cut off.</small>
+          </div>
+
+          <div class="chz-settings-row">
             <div class="chz-settings-label-row">
               <label for="chz-set-prompt-rag-classifier" data-i18n="chapterize.settings_rag_classifier_prompt">Classifier prompt</label>
               <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"

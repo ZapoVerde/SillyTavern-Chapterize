@@ -200,6 +200,7 @@ const SETTINGS_DEFAULTS = Object.freeze({
     maxConcurrentCalls:  DEFAULT_CONCURRENCY,
     profileId:           null,
     ragProfileId:        null,
+    ragMaxTokens:        100,
     ragClassifierPrompt: DEFAULT_RAG_CLASSIFIER_PROMPT,
     cardPrompt:          DEFAULT_CARD_PROMPT,
     cardPromptAft:       DEFAULT_CARD_PROMPT_AFT,
@@ -591,20 +592,19 @@ async function generateWithProfile(prompt, maxTokens = null) {
     return generateRaw({ prompt, trimNames: false, responseLength: maxTokens });
 }
 
-const RAG_MAX_TOKENS = 100;
-
 /**
  * Like generateWithProfile but uses the RAG-specific connection profile
  * (ragProfileId). Falls back to the main profile, then to the global connection.
- * Capped at RAG_MAX_TOKENS to prevent runaway outputs.
+ * Capped at ragMaxTokens (configurable in settings) to prevent runaway outputs.
  */
 async function generateWithRagProfile(prompt) {
+    const ragMaxTokens = getSettings().ragMaxTokens ?? 100;
     const ragProfileId = getSettings().ragProfileId;
     if (ragProfileId) {
-        const result = await ConnectionManagerRequestService.sendRequest(ragProfileId, prompt, RAG_MAX_TOKENS);
+        const result = await ConnectionManagerRequestService.sendRequest(ragProfileId, prompt, ragMaxTokens);
         return result.content;
     }
-    return generateWithProfile(prompt, RAG_MAX_TOKENS);
+    return generateWithProfile(prompt, ragMaxTokens);
 }
 
 async function runSuggestionsCall(bioText) {
@@ -3073,6 +3073,14 @@ function bindSettingsHandlers() {
     } catch (e) {
         console.warn('[Chapterize] Could not initialize RAG profile dropdown:', e);
     }
+
+    $('#chz-set-rag-max-tokens').on('input', () => {
+        const val = parseInt($('#chz-set-rag-max-tokens').val(), 10);
+        if (!isNaN(val) && val >= 1) {
+            getSettings().ragMaxTokens = val;
+            saveSettingsDebounced();
+        }
+    });
 
     $('#chz-set-prompt-card').on('input', () => {
         getSettings().cardPrompt = $('#chz-set-prompt-card').val();
