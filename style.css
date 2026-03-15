@@ -184,9 +184,9 @@
     cursor: not-allowed;
 }
 
-#chz-situation-text {
+#chz-rag-raw {
     height: auto;
-    min-height: var(--chz-textarea-h);
+    min-height: var(--chz-textarea-h-tall);
     overflow: hidden;
     resize: none;
 }

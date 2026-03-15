@@ -1350,6 +1350,7 @@ function onRagTabSwitch(tabName) {
 
     if (tabName === 'raw' && !_ragRawDetached) {
         $('#chz-rag-raw').val(compileRagFromChunks());
+        autoResizeRagRaw();
     }
 }
 
@@ -1358,6 +1359,7 @@ function onRagTabSwitch(tabName) {
  * Marks the raw view as detached and locks the sectioned view.
  */
 function onRagRawInput() {
+    autoResizeRagRaw();
     if (!_ragRawDetached) {
         _ragRawDetached = true;
         $('#chz-rag-raw').addClass('chz-rag-detached');
@@ -1376,6 +1378,7 @@ function onRagRawInput() {
 function onRagRevertRaw() {
     _ragRawDetached = false;
     $('#chz-rag-raw').val(compileRagFromChunks()).removeClass('chz-rag-detached');
+    autoResizeRagRaw();
     $('#chz-rag-raw-detached-label').addClass('chz-hidden');
     $('#chz-rag-detached-warn').addClass('chz-hidden');
     $('#chz-rag-detached-revert').addClass('chz-hidden');
@@ -1427,7 +1430,6 @@ function injectModal() {
 
     // Step 2 — Situation Workshop
     $('#chz-regen-situation').on('click', onRegenSituationClick);
-    $('#chz-situation-text').on('input', autoResizeSituationText);
 
     // Step 3 — Lorebook Workshop
     $('#lbchz-regen').on('click',                 onLbRegenClick);
@@ -2169,8 +2171,8 @@ function populateSuggestions(text) {
     }
 }
 
-function autoResizeSituationText() {
-    const el = document.getElementById('chz-situation-text');
+function autoResizeRagRaw() {
+    const el = document.getElementById('chz-rag-raw');
     if (!el) return;
     el.style.height = 'auto';
     el.style.height = el.scrollHeight + 'px';
@@ -2179,7 +2181,6 @@ function autoResizeSituationText() {
 function populateSituation(text) {
     setSituationLoading(false);
     $('#chz-situation-text').val(text);
-    autoResizeSituationText();
 }
 
 function showSuggestionsError(message) {
