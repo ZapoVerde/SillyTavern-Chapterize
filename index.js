@@ -1284,10 +1284,9 @@ function buildRagCardHTML(chunk) {
     return `
 <div class="chz-rag-card" data-chunk-index="${i}" data-status="${chunk.status}">
   <div class="chz-rag-card-header-row">
-    <input class="chz-input chz-rag-card-header" type="text"
-           data-chunk-index="${i}"
-           value="${escapeHtml(chunk.header)}"
-           ${isInFlight || _ragRawDetached ? 'disabled' : ''}>
+    <textarea class="chz-input chz-rag-card-header"
+              data-chunk-index="${i}"
+              ${isInFlight || _ragRawDetached ? 'disabled' : ''}>${escapeHtml(chunk.header)}</textarea>
     <span class="chz-rag-card-spinner fa-solid fa-spinner fa-spin${isInFlight ? '' : ' chz-hidden'}"></span>
     <span class="chz-rag-queue-label${isPending ? '' : ' chz-hidden'}">${queueText}</span>
     <button class="chz-btn chz-btn-secondary chz-btn-sm chz-rag-card-regen"
@@ -1303,11 +1302,17 @@ function buildRagCardHTML(chunk) {
  * Renders all chunk cards into #chz-rag-cards. Called once on workshop entry
  * (or whenever _ragChunks is rebuilt). Use renderRagCard for incremental updates.
  */
+function autoResizeRagCardHeader(el) {
+    el.style.height = 'auto';
+    el.style.height = el.scrollHeight + 'px';
+}
+
 function renderRagWorkshop() {
     const $cards = $('#chz-rag-cards').empty();
     for (const chunk of _ragChunks) {
         $cards.append(buildRagCardHTML(chunk));
     }
+    $cards.find('.chz-rag-card-header').each(function () { autoResizeRagCardHeader(this); });
 }
 
 /**
@@ -1328,9 +1333,10 @@ function renderRagCard(chunkIndex) {
     const disabled   = isInFlight || _ragRawDetached;
 
     $card.attr('data-status', chunk.status);
-    $card.find('.chz-rag-card-header')
+    const $header = $card.find('.chz-rag-card-header')
         .val(chunk.header)
         .prop('disabled', disabled);
+    autoResizeRagCardHeader($header[0]);
     $card.find('.chz-rag-card-spinner').toggleClass('chz-hidden', !isInFlight);
     $card.find('.chz-rag-queue-label').toggleClass('chz-hidden', !isPending).text(queueText);
     $card.find('.chz-rag-card-regen').prop('disabled', _ragRawDetached);
@@ -1454,6 +1460,7 @@ function injectModal() {
     });
     $('#chz-modal').on('input', '.chz-rag-card-header', function () {
         const idx = parseInt($(this).data('chunk-index'), 10);
+        autoResizeRagCardHeader(this);
         if (!isNaN(idx) && _ragChunks[idx]) {
             _ragChunks[idx].header = $(this).val();
             _ragChunks[idx].status = 'manual';
