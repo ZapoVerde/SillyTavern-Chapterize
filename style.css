@@ -626,6 +626,8 @@
     padding: 3px 6px;
     box-sizing: border-box;
     font-family: inherit;
+    white-space: pre-wrap;
+    word-wrap: break-word;
 }
 
 .chz-rag-card-header:disabled {
@@ -686,9 +688,8 @@
 .chz-rag-item {
     font-size: 0.8rem;
     line-height: 1.5;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    white-space: normal; 
+    word-break: break-word;
 }
 
 .chz-rag-item--existing  { color: var(--chz-text-muted); }

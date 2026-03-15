@@ -574,26 +574,29 @@ function interpolate(template, vars) {
 
 // ─── LLM Calls ───────────────────────────────────────────────────────────────
 
-async function generateWithProfile(prompt) {
+async function generateWithProfile(prompt, maxTokens = null) {
     const profileId = getSettings().profileId;
     if (profileId) {
-        const result = await ConnectionManagerRequestService.sendRequest(profileId, prompt, null);
+        const result = await ConnectionManagerRequestService.sendRequest(profileId, prompt, maxTokens);
         return result.content;
     }
-    return generateRaw({ prompt, trimNames: false });
+    return generateRaw({ prompt, trimNames: false, responseLength: maxTokens });
 }
+
+const RAG_MAX_TOKENS = 100;
 
 /**
  * Like generateWithProfile but uses the RAG-specific connection profile
  * (ragProfileId). Falls back to the main profile, then to the global connection.
+ * Capped at RAG_MAX_TOKENS to prevent runaway outputs.
  */
 async function generateWithRagProfile(prompt) {
     const ragProfileId = getSettings().ragProfileId;
     if (ragProfileId) {
-        const result = await ConnectionManagerRequestService.sendRequest(ragProfileId, prompt, null);
+        const result = await ConnectionManagerRequestService.sendRequest(ragProfileId, prompt, RAG_MAX_TOKENS);
         return result.content;
     }
-    return generateWithProfile(prompt);
+    return generateWithProfile(prompt, RAG_MAX_TOKENS);
 }
 
 async function runSuggestionsCall(bioText) {
