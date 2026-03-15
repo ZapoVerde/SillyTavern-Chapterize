@@ -4,19 +4,22 @@
  * @architectural-role Feature Entry Point
  * @description
  * SillyTavern extension that closes a roleplay chapter using a Draft/Commit
- * architecture. On button click, opens a 4-step wizard modal and fires three
+ * architecture. On button click, opens a 5-step wizard modal and fires three
  * AI calls in the background: bio suggestions and situation summary fire
  * immediately; the lorebook AI call fires after the lorebook fetch resolves.
- * Steps: (1) Character Workshop — 3-tab bio editor (Update, Draft Bio,
- * AI Raw); (2) Situation Workshop — situation summary + turns slider;
+ * Steps:
+ * (1) Character Workshop — 3-tab bio editor (Update, Draft Bio, AI Raw);
+ * (2) Situation Workshop — situation summary + turns slider;
  * (3) Lorebook Workshop — diff-based Update tab with freeform AI output,
- * UID-anchored suggestions, Virtual Document diffing, and regen reconciliation;
- * (4) Review & Commit — pre-flight summary with pending-review guard and
- * sequential server writes.
+ *     UID-anchored suggestions, and regen reconciliation;
+ * (4) Narrative Memory — RAG document builder with semantic header classification,
+ *     sliding-window chunking, concurrency-limited AI calls, and detached raw editing;
+ * (5) Review & Commit — pre-flight summary with pending-review guard and
+ *     sequential server writes.
  * All edits are staged in memory. On Finalize, changes are committed sequentially:
  *   1. Character card (create clone or edit-in-place)
- *   2. RAG upload (optional) — chapter transcript uploaded as a Data Bank file
- *      and registered in extension_settings.character_attachments for the card
+ *   2. RAG upload — chapter transcript uploaded as a Data Bank file and 
+ *      registered in extension_settings.character_attachments for the card
  *   3. Lorebook (deferred bulk write of _draftLorebook)
  *   4. New chapter chat (seeded with last N turns)
  * The Commit Receipts panel tracks step completion for safe retries. Cancel
@@ -25,21 +28,14 @@
  * @core-principles
  * 1. OWNS the full chapterize workflow from button click through new chat open.
  * 2. MUST NOT commit any server write until the user clicks Finalize.
- *    Lorebook Apply stages changes to _draftLorebook only; the bulk server write
- *    happens as step 2 of the Finalize sequence.
- * 3. DELEGATES all disk persistence to ST server endpoints via fetch; IS NOT
- *    responsible for direct filesystem access.
+ * 3. DELEGATES all disk persistence to ST server endpoints via fetch.
+ * 4. MAINTAINS strict separation between staged section data and raw document views.
  * @api-declaration
  * Side-effect module — no exported symbols.
- * Registers on load: Chapterize button in #extensionsMenu,
- *   settings panel in #extensions_settings (HTML built by buildSettingsHTML in ui.js),
- *   a hidden modal in <body> (HTML built by buildModalHTML in ui.js).
  * Entry point: onChapterizeClick() (bound to button).
- * Key internal APIs (Character Workshop): wordDiff, parseDescriptionSections,
- *   applyDescriptionSection, reparseSuggestions.
- * Key internal APIs (Lorebook Workshop): toVirtualDoc, makeLbDraftEntry,
- *   enrichLbSuggestions, updateLbDiff, onLbIngesterApply, onLbApplyAllUnresolved.
- * Key internal APIs (Narrative Memory / RAG): buildProsePairs, buildRagDocument,
+ * Key internal APIs (Character): parseDescriptionSections, applyDescriptionSection.
+ * Key internal APIs (Lorebook): toVirtualDoc, enrichLbSuggestions, updateLbDiff.
+ * Key internal APIs (RAG): buildRagChunks, ragFireChunk, ragDrainQueue, 
  *   uploadRagFile, registerCharacterAttachment.
  * @contract
  *   assertions:
@@ -50,12 +46,11 @@
  *       _suggestionsGenId, _situationGenId, _lorebookGenId,
  *       _lorebookName, _lorebookData, _draftLorebook, _lorebookLoading,
  *       _lorebookSuggestions, _lbActiveIngesterIndex, _lbDebounceTimer,
- *       _lorebookFreeformLastParsed,
- *       _currentStep, _lorebookRawText, _lorebookRawError,
+ *       _lorebookFreeformLastParsed, _currentStep, _lorebookRawText, 
+ *       _lorebookRawError, _ragChunks, _ragRawDetached, _lastSummaryUsedForRag, 
+ *       _ragInFlightCount, _ragCallQueue, _ragGlobalGenId,
  *       extension_settings.chapterize]
- *     external_io: https_apis # generateWithProfile (LLM, via generateRaw or
- *       ConnectionManagerRequestService) and ST /api/* endpoints.
- *       callPopup (ST UI — Apply All Unresolved confirmation dialog).
+ *     external_io: https_apis # generateWithProfile (LLM) and ST /api/* endpoints.
  */
 
 import { generateRaw, saveSettingsDebounced, getRequestHeaders, openCharacterChat, getCharacters, selectCharacterById, eventSource, event_types, callPopup } from '../../../../script.js';
@@ -192,6 +187,7 @@ const SETTINGS_DEFAULTS = Object.freeze({
     turnsN:              DEFAULT_TURNS_N,
     storeChangelog:      true,
     enableRag:           false,
+    ragAiMode:           true,
     classifierLookback:  DEFAULT_LOOKBACK,
     maxConcurrentCalls:  DEFAULT_CONCURRENCY,
     profileId:           null,
@@ -663,11 +659,23 @@ function parseChapter(name) {
 // ─── Character Form Data ──────────────────────────────────────────────────────
 
 /**
- * Builds a FormData populated with the character fields that are common to both
- * /api/characters/create and /api/characters/edit. Callers append their own
- * endpoint-specific fields afterward.
- * @param {object} char      - character object to source fields from
- * @param {object} overrides - optional { name?, description? } to override char's values
+ * @section Persistence Layer
+ * @architectural-role Data Access Layer
+ * @description 
+ * Encapsulates all direct communication with the SillyTavern server via fetch. 
+ * Responsible for FormData construction, character cloning, lorebook 
+ * synchronization, and chat file serialization.
+ * @core-principles
+ *   1. ATOMICITY: Functions should handle single-entity writes (e.g., just the 
+ *      card, just the chat) to allow the Finalize Flow to manage retries.
+ *   2. ABSTRACTION: Hides endpoint paths and request header complexity 
+ *      from the workshop logic.
+ * @api-declaration
+ *   createCharacterClone, saveCharacter, lbSaveLorebook, saveNewChat, 
+ *   lbEnsureLorebook, uploadRagFile.
+ * @contract
+ *   assertions:
+ *     external_io: [ST /api/characters/*, /api/worldinfo/*, /api/chats/*, /api/files/*]
  */
 function buildCharacterFormData(char, overrides = {}) {
     const name        = overrides.name        ?? char.name;
@@ -1243,9 +1251,29 @@ function applyDescriptionSection(text, startLine, endLine, newContent) {
 // ─── RAG Workshop UI (Step 4) ─────────────────────────────────────────────────
 
 /**
- * Builds the HTML string for a single RAG chunk card.
- * @param {{chunkIndex:number, header:string, content:string, status:string}} chunk
- * @returns {string}
+ * @section Narrative Memory (RAG) Workshop
+ * @architectural-role Component Workshop Logic
+ * @description 
+ * Manages the transformation of the session transcript into a structured RAG 
+ * document. Orchestrates a pipeline of semantic classification calls that 
+ * transform dialogue chunks into descriptive headers. Implements a "detached" 
+ * architecture where users can switch between a sectioned view (AI-driven) 
+ * and a raw text view (manual override).
+ * @core-principles
+ *   1. CONCURRENCY: Must throttle AI calls via a queue to avoid provider rate limits.
+ *   2. STALENESS: Must detect if the Situation Summary (used as context) changes 
+ *      while classification calls are in-flight.
+ *   3. PRESERVATION: Manual edits to the raw document must "detach" the workshop, 
+ *      preventing AI results from overwriting user changes.
+ * @api-declaration
+ *   UI: buildRagCardHTML, renderRagWorkshop, renderRagCard, onRagTabSwitch.
+ *   State: onRagRawInput, onRagRevertRaw, ragFireChunk, ragDrainQueue.
+ * @contract
+ *   assertions:
+ *     purity: impure (DOM & State mutation)
+ *     state_ownership: [_ragChunks, _ragRawDetached, _lastSummaryUsedForRag, 
+ *       _ragInFlightCount, _ragCallQueue, _ragGlobalGenId]
+ *     external_io: [generateWithRagProfile]
  */
 function buildRagCardHTML(chunk) {
     const i          = chunk.chunkIndex;
@@ -1496,9 +1524,24 @@ function closeModal() {
 }
 
 /**
- * One-time per-session initialisation — called once inside onChapterizeClick,
- * never by updateWizard. Populates the bio textarea, resets all transient UI,
- * and sets loading spinners before the parallel AI calls fire.
+ * @section Wizard Orchestration
+ * @architectural-role State Controller
+ * @description 
+ * Manages the high-level wizard lifecycle, including session initialization, 
+ * step-to-step navigation, and UI state synchronization. Acts as the 
+ * "traffic controller" that triggers workshop-specific entry/exit logic.
+ * @core-principles
+ *   1. IDEMPOTENCY: Opening the wizard must reset all transient state but 
+ *      preserve settings-based defaults.
+ *   2. CLEANUP: Must ensure all background timers and pending AI genIds 
+ *      are invalidated when the wizard closes.
+ * @api-declaration
+ *   initWizardSession, updateWizard, onEnterRagWorkshop, onLeaveRagWorkshop.
+ * @contract
+ *   assertions:
+ *     purity: impure
+ *     state_ownership: [_currentStep, _finalizeSteps, _suggestionsGenId, 
+ *       _situationGenId, _lorebookGenId, _ragGlobalGenId]
  */
 function initWizardSession() {
     _cardSuggestions     = [];
@@ -1591,6 +1634,12 @@ function onEnterRagWorkshop() {
     } else if (_ragChunks.length > 0) {
         // Refresh card render in case detached state changed or queue positions shifted
         renderRagWorkshop();
+    }
+
+    // Simple mode — fallback labels only, no AI calls needed
+    if (!getSettings().ragAiMode) {
+        hideRagNoSummaryMessage();
+        return;
     }
 
     if (!summaryText || hasError) {
@@ -2913,6 +2962,18 @@ function populateRagPanel() {
     $('#chz-step5-rag').removeClass('chz-hidden');
 }
 
+/**
+ * Reflects the current enableRag / ragAiMode settings onto the settings panel
+ * by adding or removing the .chz-disabled class from the two subgroup containers.
+ * Called on init and whenever either toggle changes.
+ */
+function updateRagSettingsState() {
+    const ragEnabled = getSettings().enableRag;
+    const aiEnabled  = ragEnabled && getSettings().ragAiMode;
+    $('#chz-rag-settings-body').toggleClass('chz-disabled', !ragEnabled);
+    $('#chz-rag-ai-controls').toggleClass('chz-disabled', !aiEnabled);
+}
+
 function bindSettingsHandlers() {
     $('#chz-set-turns').on('input', () => {
         const val = parseInt($('#chz-set-turns').val(), 10);
@@ -2930,7 +2991,17 @@ function bindSettingsHandlers() {
     $('#chz-set-rag').on('change', () => {
         getSettings().enableRag = $('#chz-set-rag').is(':checked');
         saveSettingsDebounced();
+        updateRagSettingsState();
     });
+
+    $('#chz-set-rag-ai-mode').on('change', () => {
+        getSettings().ragAiMode = $('#chz-set-rag-ai-mode').is(':checked');
+        saveSettingsDebounced();
+        updateRagSettingsState();
+    });
+
+    // Reflect initial state on panel load
+    updateRagSettingsState();
 
     $('#chz-set-lookback').on('input', () => {
         const val = parseInt($('#chz-set-lookback').val(), 10);
