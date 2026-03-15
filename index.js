@@ -336,7 +336,7 @@ function buildRagDocument(ragChunks) {
     if (!ragChunks.length) return '';
     return ragChunks
         .map(c => `### ${c.header}\n\n${c.content}`)
-        .join('\n\n---\n\n');
+        .join('\n\n***\n\n');
 }
 
 /**
@@ -380,7 +380,7 @@ function buildRagChunks(pairs) {
 function compileRagFromChunks() {
     return _ragChunks
         .map(c => `### ${c.header}\n\n${c.content}`)
-        .join('\n\n---\n\n');
+        .join('\n\n***\n\n');
 }
 
 /**
@@ -497,7 +497,7 @@ async function runRagClassifierCall(summaryText, contextPairs, targetPairs) {
  * @param {string} rawText
  */
 function maybeWarnRawDocument(rawText) {
-    const sections = rawText.split(/\n---\n/).filter(s => s.trim());
+    const sections = rawText.split(/\n\*\*\*\n/).filter(s => s.trim()); 
     const hasEmptyHeader = sections.some(s => {
         const first = s.trim().split('\n')[0] ?? '';
         return first === '###' || first.trim() === '';
@@ -2190,6 +2190,7 @@ function autoResizeRagRaw() {
 
 function populateSituation(text) {
     setSituationLoading(false);
+    $('#chz-error-2').addClass('chz-hidden').text('');
     $('#chz-situation-text').val(text);
 }
 
