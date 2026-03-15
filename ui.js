@@ -402,6 +402,23 @@ export function buildSettingsHTML(minTurns, maxTurns, minLookback, maxLookback, 
         <small data-i18n="chapterize.settings_concurrency_hint" style="opacity:0.7">Maximum number of simultaneous AI calls when classifying memory chunks. Higher values are faster but may hit rate limits.</small>
       </div>
 
+      <div class="chz-settings-row">
+        <label for="chz-set-rag-profile" data-i18n="chapterize.settings_rag_profile_label">RAG Classifier Connection Profile</label>
+        <select id="chz-set-rag-profile" class="text_pole"></select>
+        <small data-i18n="chapterize.settings_rag_profile_hint" style="opacity:0.7">Connection profile used specifically for chunk header classification calls. Falls back to the General profile, then the global connection.</small>
+      </div>
+
+      <div class="chz-settings-row">
+        <div class="chz-settings-label-row">
+          <label for="chz-set-prompt-rag-classifier" data-i18n="chapterize.settings_rag_classifier_prompt">Classifier prompt</label>
+          <button class="chz-btn chz-btn-secondary chz-btn-sm chz-reset-btn"
+                  data-target="chz-set-prompt-rag-classifier" data-key="ragClassifierPrompt"
+                  data-i18n="chapterize.reset">Reset</button>
+        </div>
+        <textarea id="chz-set-prompt-rag-classifier" class="chz-settings-textarea">${escapeHtml(s.ragClassifierPrompt)}</textarea>
+        <small style="opacity:0.7">Placeholders: <code>{{summary}}</code>, <code>{{context_block}}</code>, <code>{{target_turns}}</code></small>
+      </div>
+
     </div>
   </div>
 </div>`;

@@ -195,6 +195,8 @@ const SETTINGS_DEFAULTS = Object.freeze({
     classifierLookback:  DEFAULT_LOOKBACK,
     maxConcurrentCalls:  DEFAULT_CONCURRENCY,
     profileId:           null,
+    ragProfileId:        null,
+    ragClassifierPrompt: DEFAULT_RAG_CLASSIFIER_PROMPT,
     cardPrompt:          DEFAULT_CARD_PROMPT,
     cardPromptAft:       DEFAULT_CARD_PROMPT_AFT,
     situationPrompt:     DEFAULT_SITUATION_PROMPT,
@@ -483,13 +485,14 @@ async function runRagClassifierCall(summaryText, contextPairs, targetPairs) {
         ? `CONTEXT TURNS (for background only — do NOT classify these):\n${formatPairs(contextPairs)}\n\n`
         : '';
 
-    const prompt = interpolate(DEFAULT_RAG_CLASSIFIER_PROMPT, {
+    const promptTemplate = getSettings().ragClassifierPrompt || DEFAULT_RAG_CLASSIFIER_PROMPT;
+    const prompt = interpolate(promptTemplate, {
         summary:       summaryText,
         context_block: contextBlock,
         target_turns:  formatPairs(targetPairs),
     });
 
-    return generateWithProfile(prompt);
+    return generateWithRagProfile(prompt);
 }
 
 /**
@@ -582,6 +585,19 @@ async function generateWithProfile(prompt) {
         return result.content;
     }
     return generateRaw({ prompt, trimNames: false });
+}
+
+/**
+ * Like generateWithProfile but uses the RAG-specific connection profile
+ * (ragProfileId). Falls back to the main profile, then to the global connection.
+ */
+async function generateWithRagProfile(prompt) {
+    const ragProfileId = getSettings().ragProfileId;
+    if (ragProfileId) {
+        const result = await ConnectionManagerRequestService.sendRequest(ragProfileId, prompt, null);
+        return result.content;
+    }
+    return generateWithProfile(prompt);
 }
 
 async function runSuggestionsCall(bioText) {
@@ -2945,6 +2961,19 @@ function bindSettingsHandlers() {
         console.warn('[Chapterize] Could not initialize profile dropdown:', e);
     }
 
+    try {
+        ConnectionManagerRequestService.handleDropdown(
+            '#chz-set-rag-profile',
+            getSettings().ragProfileId ?? '',
+            (profile) => {
+                getSettings().ragProfileId = profile?.id ?? null;
+                saveSettingsDebounced();
+            },
+        );
+    } catch (e) {
+        console.warn('[Chapterize] Could not initialize RAG profile dropdown:', e);
+    }
+
     $('#chz-set-prompt-card').on('input', () => {
         getSettings().cardPrompt = $('#chz-set-prompt-card').val();
         saveSettingsDebounced();
@@ -2972,6 +3001,11 @@ function bindSettingsHandlers() {
 
     $('#chz-set-prompt-lorebook-aft').on('input', () => {
         getSettings().lorebookPromptAft = $('#chz-set-prompt-lorebook-aft').val();
+        saveSettingsDebounced();
+    });
+
+    $('#chz-set-prompt-rag-classifier').on('input', () => {
+        getSettings().ragClassifierPrompt = $('#chz-set-prompt-rag-classifier').val();
         saveSettingsDebounced();
     });
 

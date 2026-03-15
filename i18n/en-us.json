@@ -71,5 +71,8 @@
     "chapterize.settings_lookback_hint":       "How many dialogue turns preceding each chunk are sent to the AI as context-only when generating semantic headers. 0 = no look-back.",
     "chapterize.settings_concurrency_label":   "Max Concurrent Classifier Calls",
     "chapterize.settings_concurrency_hint":    "Maximum number of simultaneous AI calls when classifying memory chunks. Higher values are faster but may hit rate limits.",
+    "chapterize.settings_rag_profile_label":   "RAG Classifier Connection Profile",
+    "chapterize.settings_rag_profile_hint":    "Connection profile used specifically for chunk header classification calls. Falls back to the General profile, then the global connection.",
+    "chapterize.settings_rag_classifier_prompt": "Classifier prompt",
     "chapterize.reset":                        "Reset"
 }
