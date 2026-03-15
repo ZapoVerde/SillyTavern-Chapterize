@@ -331,16 +331,10 @@ function utf8ToBase64(str) {
  * @returns {Promise<string>} The server-assigned URL for the uploaded file.
  */
 async function uploadRagFile(text, fileName) {
-    const formData = new FormData();
-    formData.append('upload', new Blob([text], { type: 'text/plain' }), fileName);
-
-    const headers = getRequestHeaders();
-    delete headers['Content-Type'];
-
     const res = await fetch('/api/files/upload', {
         method:  'POST',
-        headers: headers,
-        body:    formData,
+        headers: getRequestHeaders(),
+        body:    JSON.stringify({ name: fileName, data: utf8ToBase64(text) }),
     });
     if (!res.ok) {
         const errorText = await res.text();
@@ -1662,9 +1656,13 @@ function populateSuggestions(text) {
     $('#chz-raw-error').addClass('chz-hidden').text('');
     $('#chz-suggestions-raw').val(text);
     reparseSuggestions();
-    // If the Ingester tab is currently open, refresh its dropdown
+    // If the Ingester tab is currently open, refresh its dropdown and detail pane
     if (!$('#chz-tab-ingester').hasClass('chz-hidden')) {
+        _activeIngesterIndex = Math.max(0, Math.min(_activeIngesterIndex, _cardSuggestions.length - 1));
         populateIngesterDropdown();
+        if (_cardSuggestions[_activeIngesterIndex]) {
+            renderIngesterDetail(_cardSuggestions[_activeIngesterIndex]);
+        }
     }
 }
 
@@ -1724,6 +1722,17 @@ function populateLbFreeform(text) {
     setLbLoading(false);
     $('#lbchz-freeform').val(text);
     _lorebookFreeformLastParsed = null; // force re-enrichment on next Ingester tab switch
+    // If the Ingester tab is currently open, refresh it immediately
+    if (!$('#lbchz-tab-ingester').hasClass('chz-hidden')) {
+        const freshParsed = parseLbSuggestions(text);
+        _lorebookSuggestions = enrichLbSuggestions(freshParsed);
+        _lorebookFreeformLastParsed = text;
+        _lbActiveIngesterIndex = Math.max(0, Math.min(_lbActiveIngesterIndex, _lorebookSuggestions.length - 1));
+        populateLbIngesterDropdown();
+        if (_lorebookSuggestions[_lbActiveIngesterIndex]) {
+            renderLbIngesterDetail(_lorebookSuggestions[_lbActiveIngesterIndex]);
+        }
+    }
 }
 
 function showLbError(message) {
