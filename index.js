@@ -167,20 +167,28 @@ Keys line. The *Reason:* line closes each block. Leave one blank line between bl
 `;
 
 const DEFAULT_RAG_CLASSIFIER_PROMPT = `
-[SYSTEM: TASK — NARRATIVE MEMORY CLASSIFIER]
-Your job is to write a single, concise semantic header (5–12 words) that captures the core dramatic event or shift in the TARGET TURNS below.
+You are a precise Narrative Memory Classifier.
 
-GLOBAL CHAPTER SUMMARY (read for context — do NOT classify this):
+Output rules — follow exactly, no exceptions:
+- Output ONLY the 2–3 sentence header text in present tense.
+- No quotes. No final punctuation. No explanations. No other text at all.
+- Capture ONLY the core dramatic event, revelation, confrontation, decision, or emotional shift in the TARGET TURNS.
+- Ignore the GLOBAL CHAPTER SUMMARY except as loose context.
+
+Focus priority:
+- Most significant narrative moment only
+- Present tense, concise (2–3 sentences max)
+
+Example:
+TARGET TURNS: [character finds hidden letter] [reads it] [gasps] "It was you all along."
+Header: The protagonist discovers undeniable proof of betrayal in the hidden letter. Shock and realization hit as the truth becomes clear
+
+GLOBAL CHAPTER SUMMARY (context only — do NOT classify):
 {{summary}}
+{{context_block}}
 
-{{context_block}}TARGET TURNS:
+TARGET TURNS:
 {{target_turns}}
-
-INSTRUCTIONS:
-- Output ONLY the header text. No quotes. No punctuation at the end. No explanation.
-- The header must describe only what happens in the TARGET TURNS.
-- Focus on the most narratively significant moment: a revelation, confrontation, decision, or emotional shift.
-- Write in present tense. Example: Mira discovers the stolen key in the guard's pocket
 `;
 
 const SETTINGS_DEFAULTS = Object.freeze({
