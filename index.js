@@ -285,32 +285,28 @@ function buildProsePairs(messages) {
 }
 
 /**
- * Builds the RAG document: one situation-summary chunk followed by per-turn-pair
- * chunks, each prefixed with a short context line. Chunks are separated by `\n\n`
- * so SillyTavern's recursive splitter treats each as a discrete boundary.
- * Uses a sliding window of 2 pairs (stride 1) for overlap continuity.
- * @param {string} situationText  Finalized Situation Summary text.
+ * Builds the RAG document as a sequence of anchored, windowed chunks separated
+ * by heavy dividers. Each chunk begins with a Markdown tertiary header repeating
+ * the chapter name, followed by bracketed uppercase speaker turns. Chunks are
+ * separated by `\n\n---\n\n` so ST's recursive splitter treats each window as a
+ * discrete vector entry. Uses a sliding window of 2 pairs (stride 1) for overlap.
+ * @param {string} chapterName  Display name for the chapter (e.g. "Isobel Quay (Ch10)").
  * @param {{user: object, ai: object}[]} pairs
  * @returns {string}
  */
-function buildRagDocument(situationText, pairs) {
-    if (!pairs.length) return situationText || '';
+function buildRagDocument(chapterName, pairs) {
+    if (!pairs.length) return '';
+    const anchor = `### ${chapterName}`;
     const chunks = [];
-    // Chunk 0: full situation summary (retrieved for narrative-state queries)
-    if (situationText) chunks.push(situationText);
-    // Short one-line context prefix for every turn chunk (truncated to stay under chunk_size_db)
-    const contextLine = situationText
-        ? `[Context: ${situationText.slice(0, 250).replace(/\n/g, ' ')}]`
-        : '';
     // Sliding window of 2 pairs, stride 1; last window may be 1 pair
     for (let i = 0; i < pairs.length; i++) {
         const window = pairs.slice(i, i + 2);
         const turnText = window
-            .map(p => `${p.user.name}: ${p.user.mes}\n${p.ai.name}: ${p.ai.mes}`)
-            .join('\n');
-        chunks.push(contextLine ? `${contextLine}\n${turnText}` : turnText);
+            .map(p => `[${p.user.name.toUpperCase()}]\n${p.user.mes}\n\n[${p.ai.name.toUpperCase()}]\n${p.ai.mes}`)
+            .join('\n\n');
+        chunks.push(`${anchor}\n\n${turnText}\n\n`);
     }
-    return chunks.join('\n\n');
+    return chunks.join('---\n\n');
 }
 
 /**
@@ -2276,7 +2272,7 @@ async function onConfirmClick() {
     if (getSettings().enableRag && !_finalizeSteps.ragSaved) {
         try {
             const situationText = $('#chz-situation-text').val().trim();
-            const ragText       = buildRagDocument(situationText, _stagedProsePairs);
+            const ragText       = buildRagDocument(_cloneName, _stagedProsePairs);
             const ragFileName   = `${_cloneName}.txt`;
             const ragUrl        = await uploadRagFile(ragText, ragFileName);
             // After card save, _cloneAvatarUrl is set for clone mode; chapter mode keeps char.avatar
