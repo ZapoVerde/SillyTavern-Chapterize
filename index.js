@@ -331,10 +331,18 @@ function utf8ToBase64(str) {
  * @returns {Promise<string>} The server-assigned URL for the uploaded file.
  */
 async function uploadRagFile(text, fileName) {
+    const sanitizeRes = await fetch('/api/files/sanitize-filename', {
+        method:  'POST',
+        headers: getRequestHeaders(),
+        body:    JSON.stringify({ fileName }),
+    });
+    if (!sanitizeRes.ok) throw new Error(`Could not sanitize filename (HTTP ${sanitizeRes.status})`);
+    const { fileName: safeName } = await sanitizeRes.json();
+
     const res = await fetch('/api/files/upload', {
         method:  'POST',
         headers: getRequestHeaders(),
-        body:    JSON.stringify({ name: fileName, data: utf8ToBase64(text) }),
+        body:    JSON.stringify({ name: safeName, data: utf8ToBase64(text) }),
     });
     if (!res.ok) {
         const errorText = await res.text();
