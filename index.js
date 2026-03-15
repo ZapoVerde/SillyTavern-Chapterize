@@ -1,6 +1,6 @@
 /**
  * @file data/default-user/extensions/chapterize/index.js
- * @stamp {"utc":"2026-03-14T00:00:00.000Z"}
+ * @stamp {"utc":"2026-03-15T00:00:00.000Z"}
  * @architectural-role Feature Entry Point
  * @description
  * SillyTavern extension that closes a roleplay chapter using a Draft/Commit
@@ -72,6 +72,12 @@ const SITUATION_SEP   = '\n\n*** Chapterize Divider — Do Not Edit ***\n\n';
 const MIN_TURNS       = 1;
 const MAX_TURNS       = 10;
 const DEFAULT_TURNS_N = 4;
+const MIN_LOOKBACK        = 0;
+const MAX_LOOKBACK        = 10;
+const DEFAULT_LOOKBACK    = 1;
+const MIN_CONCURRENCY     = 1;
+const MAX_CONCURRENCY     = 10;
+const DEFAULT_CONCURRENCY = 5;
 
 const DEFAULT_CARD_PROMPT = `
 TASK:
@@ -165,10 +171,29 @@ on its own line. The Keys line must immediately follow the header line. Content 
 Keys line. The *Reason:* line closes each block. Leave one blank line between blocks.
 `;
 
+const DEFAULT_RAG_CLASSIFIER_PROMPT = `
+[SYSTEM: TASK — NARRATIVE MEMORY CLASSIFIER]
+Your job is to write a single, concise semantic header (5–12 words) that captures the core dramatic event or shift in the TARGET TURNS below.
+
+GLOBAL CHAPTER SUMMARY (read for context — do NOT classify this):
+{{summary}}
+
+{{context_block}}TARGET TURNS:
+{{target_turns}}
+
+INSTRUCTIONS:
+- Output ONLY the header text. No quotes. No punctuation at the end. No explanation.
+- The header must describe only what happens in the TARGET TURNS.
+- Focus on the most narratively significant moment: a revelation, confrontation, decision, or emotional shift.
+- Write in present tense. Example: Mira discovers the stolen key in the guard's pocket
+`;
+
 const SETTINGS_DEFAULTS = Object.freeze({
     turnsN:              DEFAULT_TURNS_N,
     storeChangelog:      true,
     enableRag:           false,
+    classifierLookback:  DEFAULT_LOOKBACK,
+    maxConcurrentCalls:  DEFAULT_CONCURRENCY,
     profileId:           null,
     cardPrompt:          DEFAULT_CARD_PROMPT,
     cardPromptAft:       DEFAULT_CARD_PROMPT_AFT,
@@ -232,9 +257,20 @@ let _lbActiveIngesterIndex      = 0;    // current selection in lorebook ingeste
 let _lbDebounceTimer            = null; // setTimeout handle for lorebook diff update debounce
 let _lorebookFreeformLastParsed = null; // freeform text at last enrichment; null forces re-enrich
 
+// ─── RAG Workshop State (Step 4) ──────────────────────────────────────────────
+// Chunk statuses: 'pending' | 'in-flight' | 'complete' | 'stale' | 'manual'
+// _ragChunks: [{chunkIndex, pairStart, turnLabel, content, header, status, genId}]
+
+let _ragChunks             = [];   // one entry per sliding-window chunk
+let _ragRawDetached        = false; // true when the Combined Raw textarea has been edited
+let _lastSummaryUsedForRag = null;  // summary string used to fire the last batch of calls
+let _ragInFlightCount      = 0;    // count of calls currently awaiting a response
+let _ragCallQueue          = [];   // chunk indices queued but not yet fired
+let _ragGlobalGenId        = 0;    // incremented only on closeModal to kill all in-flight
+
 // ─── Wizard State ─────────────────────────────────────────────────────────────
 
-let _currentStep     = 1;    // active wizard step (1–4)
+let _currentStep     = 1;    // active wizard step (1–5)
 let _lorebookRawText = '';   // buffered AI result text for Step 3 freeform
 let _lorebookRawError = '';  // buffered AI error message for Step 3
 
@@ -271,42 +307,206 @@ function buildTranscript(messages) {
  * Pairs user+AI messages from a chat into turn objects.
  * Skips system messages. Only complete user→AI pairs are included.
  * @param {object[]} messages
- * @returns {{user: object, ai: object}[]}
+ * @returns {{user: object, ai: object, userId: *, aiId: *, validIdx: number}[]}
  */
 function buildProsePairs(messages) {
     const valid = messages.filter(m => !m.is_system && m.mes !== undefined);
     const pairs = [];
     for (let i = 0; i < valid.length - 1; i++) {
         if (valid[i].is_user && !valid[i + 1].is_user) {
-            pairs.push({ user: valid[i], ai: valid[i + 1] });
+            pairs.push({
+                user:     valid[i],
+                ai:       valid[i + 1],
+                userId:   valid[i].id ?? i,
+                aiId:     valid[i + 1].id ?? (i + 1),
+                validIdx: i,
+            });
         }
     }
     return pairs;
 }
 
 /**
- * Builds the RAG document as a sequence of anchored, windowed chunks separated
- * by heavy dividers. Each chunk begins with a Markdown tertiary header repeating
- * the chapter name, followed by bracketed uppercase speaker turns. Chunks are
- * separated by `\n\n---\n\n` so ST's recursive splitter treats each window as a
- * discrete vector entry. Uses a sliding window of 2 pairs (stride 1) for overlap.
- * @param {string} chapterName  Display name for the chapter (e.g. "Isobel Quay (Ch10)").
- * @param {{user: object, ai: object}[]} pairs
+ * Builds the final RAG document from the workshop chunk state.
+ * Each chunk uses its current semantic header (AI-generated or user-edited).
+ * Chunks are separated by `---` so ST's recursive splitter treats each as a
+ * discrete vector entry.
+ * @param {Array} ragChunks  _ragChunks array from session state.
  * @returns {string}
  */
-function buildRagDocument(chapterName, pairs) {
-    if (!pairs.length) return '';
-    const anchor = `### ${chapterName}`;
+function buildRagDocument(ragChunks) {
+    if (!ragChunks.length) return '';
+    return ragChunks
+        .map(c => `### ${c.header}\n\n${c.content}`)
+        .join('\n\n---\n\n');
+}
+
+/**
+ * Builds the _ragChunks state array from the staged prose pairs.
+ * Uses the same sliding window of 2 pairs (stride 1) as the original
+ * buildRagDocument. The content body is the formatted dialogue; header starts
+ * as the turn-range label (fallback) and is later replaced by AI classification.
+ * @param {Array} pairs  _stagedProsePairs array.
+ * @returns {Array}
+ */
+function buildRagChunks(pairs) {
     const chunks = [];
-    // Sliding window of 2 pairs, stride 1; last window may be 1 pair
     for (let i = 0; i < pairs.length; i++) {
         const window = pairs.slice(i, i + 2);
-        const turnText = window
+        const turnA = i + 1;
+        const turnB = Math.min(i + 2, pairs.length);
+        const turnLabel = turnA === turnB
+            ? `Chunk ${i + 1} (Turn ${turnA})`
+            : `Chunk ${i + 1} (Turns ${turnA}–${turnB})`;
+        const content = window
             .map(p => `[${p.user.name.toUpperCase()}]\n${p.user.mes}\n\n[${p.ai.name.toUpperCase()}]\n${p.ai.mes}`)
             .join('\n\n');
-        chunks.push(`${anchor}\n\n${turnText}\n\n`);
+        chunks.push({
+            chunkIndex: i,
+            pairStart:  i,
+            turnLabel,
+            content,
+            header:  turnLabel,   // replaced by AI on successful classification
+            status:  'pending',
+            genId:   0,
+        });
     }
-    return chunks.join('---\n\n');
+    return chunks;
+}
+
+/**
+ * Compiles the Combined Raw text from current _ragChunks state.
+ * Pure data function — reads _ragChunks only, no DOM access.
+ * @returns {string}
+ */
+function compileRagFromChunks() {
+    return _ragChunks
+        .map(c => `### ${c.header}\n\n${c.content}`)
+        .join('\n\n---\n\n');
+}
+
+/**
+ * Fires a single RAG classifier call for the chunk at chunkIndex.
+ * Respects per-chunk genId and global ragGlobalGenId for staleness detection.
+ * Captures summaryAtCallTime to detect summary changes while in-flight.
+ * @param {number} chunkIndex
+ */
+async function ragFireChunk(chunkIndex) {
+    const chunk = _ragChunks[chunkIndex];
+    if (!chunk) return;
+    const localGenId       = ++chunk.genId;
+    const globalGenId      = _ragGlobalGenId;
+    const summaryAtCall    = _lastSummaryUsedForRag;
+    const lookback         = getSettings().classifierLookback ?? DEFAULT_LOOKBACK;
+
+    chunk.status = 'in-flight';
+    _ragInFlightCount++;
+    renderRagCard(chunkIndex);
+
+    try {
+        const contextPairs = _stagedProsePairs.slice(Math.max(0, chunkIndex - lookback), chunkIndex);
+        const targetPairs  = _stagedProsePairs.slice(chunkIndex, chunkIndex + 2);
+        const header       = await runRagClassifierCall(summaryAtCall, contextPairs, targetPairs);
+
+        if (_ragGlobalGenId !== globalGenId || chunk.genId !== localGenId) return;
+
+        // If the summary changed since this call was fired, mark as stale
+        if (_lastSummaryUsedForRag !== summaryAtCall) {
+            chunk.status = 'stale';
+        } else {
+            chunk.header = header.trim() || chunk.turnLabel;
+            chunk.status = 'complete';
+        }
+    } catch (err) {
+        if (_ragGlobalGenId !== globalGenId || chunk.genId !== localGenId) return;
+        console.error('[Chapterize] RAG classifier failed for chunk', chunkIndex, err);
+        chunk.status = 'pending';   // allow retry via regen button
+    } finally {
+        if (_ragGlobalGenId === globalGenId) {
+            _ragInFlightCount = Math.max(0, _ragInFlightCount - 1);
+            ragDrainQueue();
+        }
+    }
+
+    if (_ragGlobalGenId === globalGenId) {
+        renderRagCard(chunkIndex);
+    }
+}
+
+/**
+ * Fires queued chunks up to the maxConcurrentCalls limit.
+ */
+function ragDrainQueue() {
+    const max = getSettings().maxConcurrentCalls ?? DEFAULT_CONCURRENCY;
+    while (_ragInFlightCount < max && _ragCallQueue.length > 0) {
+        const idx = _ragCallQueue.shift();
+        ragFireChunk(idx);
+    }
+}
+
+/**
+ * Re-fires the classifier for a single card. If the card is in-flight,
+ * its in-flight slot is reclaimed and a fresh call is started immediately
+ * (bypassing the concurrency queue). Per-card regen always fires right away.
+ * @param {number} chunkIndex
+ */
+function ragRegenCard(chunkIndex) {
+    const chunk = _ragChunks[chunkIndex];
+    if (!chunk || !_lastSummaryUsedForRag) return;
+
+    if (chunk.status === 'in-flight') {
+        // Reclaim the in-flight slot — the old call result will be discarded via genId mismatch
+        _ragInFlightCount = Math.max(0, _ragInFlightCount - 1);
+    }
+    // Remove from pending queue if it was queued but not fired
+    _ragCallQueue = _ragCallQueue.filter(i => i !== chunkIndex);
+
+    chunk.status = 'pending';
+    renderRagCard(chunkIndex);
+    // Fire immediately, outside the concurrency queue
+    ragFireChunk(chunkIndex);
+}
+
+/**
+ * Builds and fires the prompt for a single RAG classification call.
+ * @param {string} summaryText  The finalized situation summary.
+ * @param {Array}  contextPairs Pairs to use as look-back context (may be empty).
+ * @param {Array}  targetPairs  The chunk pairs to classify.
+ * @returns {Promise<string>}   The raw AI response (header text).
+ */
+async function runRagClassifierCall(summaryText, contextPairs, targetPairs) {
+    const formatPairs = pairs => pairs
+        .map(p => `[${p.user.name.toUpperCase()}]\n${p.user.mes}\n\n[${p.ai.name.toUpperCase()}]\n${p.ai.mes}`)
+        .join('\n\n');
+
+    const contextBlock = contextPairs.length > 0
+        ? `CONTEXT TURNS (for background only — do NOT classify these):\n${formatPairs(contextPairs)}\n\n`
+        : '';
+
+    const prompt = interpolate(DEFAULT_RAG_CLASSIFIER_PROMPT, {
+        summary:       summaryText,
+        context_block: contextBlock,
+        target_turns:  formatPairs(targetPairs),
+    });
+
+    return generateWithProfile(prompt);
+}
+
+/**
+ * Runs a lightweight heuristic on an edited raw document and emits a
+ * non-blocking toastr if the structure looks unusual.
+ * @param {string} rawText
+ */
+function maybeWarnRawDocument(rawText) {
+    const sections = rawText.split(/\n---\n/).filter(s => s.trim());
+    const hasEmptyHeader = sections.some(s => {
+        const first = s.trim().split('\n')[0] ?? '';
+        return first === '###' || first.trim() === '';
+    });
+    const countDiff = Math.abs(sections.length - _ragChunks.length);
+    if (countDiff > 2 || hasEmptyHeader) {
+        toastr.warning('The edited RAG document looks unusual — some sections may be missing or malformed. Review before finalizing.');
+    }
 }
 
 /**
@@ -1024,6 +1224,142 @@ function applyDescriptionSection(text, startLine, endLine, newContent) {
     ].join('\n');
 }
 
+// ─── RAG Workshop UI (Step 4) ─────────────────────────────────────────────────
+
+/**
+ * Builds the HTML string for a single RAG chunk card.
+ * @param {{chunkIndex:number, header:string, content:string, status:string}} chunk
+ * @returns {string}
+ */
+function buildRagCardHTML(chunk) {
+    const i          = chunk.chunkIndex;
+    const isInFlight = chunk.status === 'in-flight';
+    const isPending  = chunk.status === 'pending';
+    const queuePos   = _ragCallQueue.indexOf(i);
+    const queueText  = queuePos >= 0 ? `queued ${queuePos + 1}` : 'pending';
+    return `
+<div class="chz-rag-card" data-chunk-index="${i}" data-status="${chunk.status}">
+  <div class="chz-rag-card-header-row">
+    <input class="chz-input chz-rag-card-header" type="text"
+           data-chunk-index="${i}"
+           value="${escapeHtml(chunk.header)}"
+           ${isInFlight || _ragRawDetached ? 'disabled' : ''}>
+    <span class="chz-rag-card-spinner fa-solid fa-spinner fa-spin${isInFlight ? '' : ' chz-hidden'}"></span>
+    <span class="chz-rag-queue-label${isPending ? '' : ' chz-hidden'}">${queueText}</span>
+    <button class="chz-btn chz-btn-secondary chz-btn-sm chz-rag-card-regen"
+            data-chunk-index="${i}"
+            title="Regenerate this chunk's semantic header"
+            ${_ragRawDetached ? 'disabled' : ''}>&#x21bb;</button>
+  </div>
+  <div class="chz-rag-card-body">${escapeHtml(chunk.content)}</div>
+</div>`;
+}
+
+/**
+ * Renders all chunk cards into #chz-rag-cards. Called once on workshop entry
+ * (or whenever _ragChunks is rebuilt). Use renderRagCard for incremental updates.
+ */
+function renderRagWorkshop() {
+    const $cards = $('#chz-rag-cards').empty();
+    for (const chunk of _ragChunks) {
+        $cards.append(buildRagCardHTML(chunk));
+    }
+}
+
+/**
+ * Updates the dynamic parts of a single card in place (status badge, spinner,
+ * queue label, header input value) without rebuilding the whole list.
+ * @param {number} chunkIndex
+ */
+function renderRagCard(chunkIndex) {
+    const chunk = _ragChunks[chunkIndex];
+    if (!chunk) return;
+    const $card = $(`.chz-rag-card[data-chunk-index="${chunkIndex}"]`);
+    if (!$card.length) return;
+
+    const isInFlight = chunk.status === 'in-flight';
+    const isPending  = chunk.status === 'pending';
+    const queuePos   = _ragCallQueue.indexOf(chunkIndex);
+    const queueText  = queuePos >= 0 ? `queued ${queuePos + 1}` : 'pending';
+    const disabled   = isInFlight || _ragRawDetached;
+
+    $card.attr('data-status', chunk.status);
+    $card.find('.chz-rag-card-header')
+        .val(chunk.header)
+        .prop('disabled', disabled);
+    $card.find('.chz-rag-card-spinner').toggleClass('chz-hidden', !isInFlight);
+    $card.find('.chz-rag-queue-label').toggleClass('chz-hidden', !isPending).text(queueText);
+    $card.find('.chz-rag-card-regen').prop('disabled', _ragRawDetached);
+}
+
+/**
+ * Handles tab switches within the Step 4 RAG Workshop.
+ * Switching to 'raw' compiles from section state (unless already detached).
+ * @param {string} tabName  'sectioned' | 'raw'
+ */
+function onRagTabSwitch(tabName) {
+    $('#chz-rag-tab-bar .chz-tab-btn').each(function () {
+        $(this).toggleClass('chz-tab-active', $(this).data('tab') === tabName);
+    });
+    $('#chz-rag-tab-sectioned').toggleClass('chz-hidden', tabName !== 'sectioned');
+    $('#chz-rag-tab-raw').toggleClass('chz-hidden', tabName !== 'raw');
+
+    if (tabName === 'raw' && !_ragRawDetached) {
+        $('#chz-rag-raw').val(compileRagFromChunks());
+    }
+}
+
+/**
+ * Fires when the user types in the Combined Raw textarea.
+ * Marks the raw view as detached and locks the sectioned view.
+ */
+function onRagRawInput() {
+    if (!_ragRawDetached) {
+        _ragRawDetached = true;
+        $('#chz-rag-raw').addClass('chz-rag-detached');
+        $('#chz-rag-raw-detached-label').removeClass('chz-hidden');
+        // Show detached warning in sectioned tab
+        $('#chz-rag-detached-warn').removeClass('chz-hidden');
+        $('#chz-rag-detached-revert').removeClass('chz-hidden');
+        // Disable all card header inputs and regen buttons
+        $('.chz-rag-card-header, .chz-rag-card-regen').prop('disabled', true);
+    }
+}
+
+/**
+ * Recompiles the Raw textarea from current section state and clears detached mode.
+ */
+function onRagRevertRaw() {
+    _ragRawDetached = false;
+    $('#chz-rag-raw').val(compileRagFromChunks()).removeClass('chz-rag-detached');
+    $('#chz-rag-raw-detached-label').addClass('chz-hidden');
+    $('#chz-rag-detached-warn').addClass('chz-hidden');
+    $('#chz-rag-detached-revert').addClass('chz-hidden');
+    // Re-enable card controls
+    renderRagWorkshop();
+}
+
+/**
+ * Shows the "missing summary" message and hides the tab bar and cards.
+ */
+function showRagNoSummaryMessage() {
+    $('#chz-rag-no-summary').removeClass('chz-hidden');
+    $('#chz-rag-tab-bar, #chz-rag-tab-sectioned, #chz-rag-tab-raw').addClass('chz-hidden');
+    $('#chz-rag-detached-warn, #chz-rag-detached-revert').addClass('chz-hidden');
+}
+
+/**
+ * Hides the "missing summary" message and restores the tab bar.
+ */
+function hideRagNoSummaryMessage() {
+    $('#chz-rag-no-summary').addClass('chz-hidden');
+    $('#chz-rag-tab-bar').removeClass('chz-hidden');
+    // Re-show the active tab panel
+    const activeTab = $('#chz-rag-tab-bar .chz-tab-active').data('tab') ?? 'sectioned';
+    $('#chz-rag-tab-sectioned').toggleClass('chz-hidden', activeTab !== 'sectioned');
+    $('#chz-rag-tab-raw').toggleClass('chz-hidden', activeTab !== 'raw');
+}
+
 // ─── Modal UI ─────────────────────────────────────────────────────────────────
 
 function injectModal() {
@@ -1065,6 +1401,25 @@ function injectModal() {
         onLbTabSwitch($(this).data('tab'));
     });
 
+    // Step 4 — Narrative Memory Workshop
+    $('#chz-modal').on('click', '#chz-rag-tab-bar .chz-tab-btn', function () {
+        onRagTabSwitch($(this).data('tab'));
+    });
+    $('#chz-modal').on('input', '.chz-rag-card-header', function () {
+        const idx = parseInt($(this).data('chunk-index'), 10);
+        if (!isNaN(idx) && _ragChunks[idx]) {
+            _ragChunks[idx].header = $(this).val();
+            _ragChunks[idx].status = 'manual';
+            $(`.chz-rag-card[data-chunk-index="${idx}"]`).attr('data-status', 'manual');
+        }
+    });
+    $('#chz-modal').on('click', '.chz-rag-card-regen', function () {
+        const idx = parseInt($(this).data('chunk-index'), 10);
+        if (!isNaN(idx)) ragRegenCard(idx);
+    });
+    $('#chz-rag-raw').on('input', onRagRawInput);
+    $('#chz-rag-revert-raw-btn').on('click', onRagRevertRaw);
+
     // Shared wizard footer
     $('#chz-cancel').on('click',    closeModal);
     $('#chz-move-back').on('click', () => updateWizard(_currentStep - 1));
@@ -1082,6 +1437,7 @@ function closeModal() {
     _suggestionsGenId++;
     _situationGenId++;
     _lorebookGenId++;
+    _ragGlobalGenId++;         // kills all in-flight RAG classifier results
     // Reset all session draft state
     _transcript              = '';
     _originalDescription     = '';
@@ -1115,6 +1471,12 @@ function closeModal() {
     _currentStep     = 1;
     _lorebookRawText  = '';
     _lorebookRawError = '';
+    // RAG Workshop state
+    _ragChunks             = [];
+    _ragRawDetached        = false;
+    _lastSummaryUsedForRag = null;
+    _ragInFlightCount      = 0;
+    _ragCallQueue          = [];
 }
 
 /**
@@ -1140,10 +1502,22 @@ function initWizardSession() {
     $('#chz-suggestions-raw').val('');
     $('#chz-raw-error').addClass('chz-hidden').text('');
     $('#chz-error-2').addClass('chz-hidden').text('');
-    $('#chz-error-4').addClass('chz-hidden').text('');
+    $('#chz-error-5').addClass('chz-hidden').text('');
     $('#chz-receipts').addClass('chz-hidden');
     $('#chz-receipts-content').empty();
     $('#chz-cancel').text('Cancel').prop('disabled', false);
+    // RAG Workshop reset
+    $('#chz-rag-cards').empty();
+    $('#chz-rag-no-summary, #chz-rag-disabled').addClass('chz-hidden');
+    $('#chz-rag-detached-warn, #chz-rag-detached-revert').addClass('chz-hidden');
+    $('#chz-rag-raw').val('').removeClass('chz-rag-detached');
+    $('#chz-rag-raw-detached-label').addClass('chz-hidden');
+    // Reset RAG tab to Sectioned
+    $('#chz-rag-tab-bar .chz-tab-btn').each(function () {
+        $(this).toggleClass('chz-tab-active', $(this).data('tab') === 'sectioned');
+    });
+    $('#chz-rag-tab-sectioned').removeClass('chz-hidden');
+    $('#chz-rag-tab-raw').addClass('chz-hidden');
 
     _lorebookSuggestions        = [];
     _lbActiveIngesterIndex      = 0;
@@ -1158,25 +1532,90 @@ function initWizardSession() {
 }
 
 /**
- * Shows the given wizard step (1–4), hides all others, and updates footer
- * button visibility. Populates the Step 4 summary when entering step 4.
+ * Shows the given wizard step (1–5), hides all others, and updates footer
+ * button visibility. Triggers workshop/summary population on step entry.
  */
 function updateWizard(n) {
+    // Leaving Step 4 backward — flush the pending queue
+    if (_currentStep === 4 && n < 4) {
+        onLeaveRagWorkshop();
+    }
     _currentStep = n;
-    for (let i = 1; i <= 4; i++) {
+    for (let i = 1; i <= 5; i++) {
         $(`#chz-step-${i}`).toggleClass('chz-hidden', i !== n);
     }
     $('#chz-move-back').toggleClass('chz-hidden', n === 1);
-    $('#chz-move-next').toggleClass('chz-hidden', n === 4);
-    $('#chz-confirm').toggleClass('chz-hidden',   n !== 4);
-    if (n === 4) populateStep4Summary();
+    $('#chz-move-next').toggleClass('chz-hidden', n === 5);
+    $('#chz-confirm').toggleClass('chz-hidden',   n !== 5);
+    if (n === 4) onEnterRagWorkshop();
+    if (n === 5) populateStep5Summary();
 }
 
 /**
- * Populates the Step 4 summary rows from current wizard state.
- * Called each time the user enters Step 4 so it reflects any Back edits.
+ * Called whenever the user enters Step 4 (Narrative Memory Workshop).
+ * Builds chunk state on first entry, detects stale summaries on re-entry,
+ * fires pending/stale classification calls.
  */
-function populateStep4Summary() {
+function onEnterRagWorkshop() {
+    if (!getSettings().enableRag) {
+        $('#chz-rag-disabled').removeClass('chz-hidden');
+        $('#chz-rag-no-summary, #chz-rag-tab-bar, #chz-rag-tab-sectioned, #chz-rag-tab-raw').addClass('chz-hidden');
+        $('#chz-rag-detached-warn, #chz-rag-detached-revert').addClass('chz-hidden');
+        return;
+    }
+    $('#chz-rag-disabled').addClass('chz-hidden');
+
+    const summaryText = $('#chz-situation-text').val().trim();
+    const hasError    = !$('#chz-error-2').hasClass('chz-hidden');
+
+    // Build chunks from staged pairs on first entry (or if pairs changed)
+    if (_ragChunks.length === 0 && _stagedProsePairs.length > 0) {
+        _ragChunks = buildRagChunks(_stagedProsePairs);
+        renderRagWorkshop();
+    } else if (_ragChunks.length > 0) {
+        // Refresh card render in case detached state changed or queue positions shifted
+        renderRagWorkshop();
+    }
+
+    if (!summaryText || hasError) {
+        showRagNoSummaryMessage();
+        return;
+    }
+    hideRagNoSummaryMessage();
+
+    // Detect summary change since last batch of calls
+    const summaryChanged = _lastSummaryUsedForRag !== null && _lastSummaryUsedForRag !== summaryText;
+    if (summaryChanged) {
+        toastr.warning('Situation Summary has changed — stale headers will be refreshed.');
+        for (const chunk of _ragChunks) {
+            if (chunk.status === 'complete') chunk.status = 'stale';
+        }
+    }
+    _lastSummaryUsedForRag = summaryText;
+
+    // Enqueue all pending and stale chunks (manual and complete remain untouched)
+    _ragCallQueue = [];
+    for (let i = 0; i < _ragChunks.length; i++) {
+        const s = _ragChunks[i].status;
+        if (s === 'pending' || s === 'stale') _ragCallQueue.push(i);
+    }
+    ragDrainQueue();
+}
+
+/**
+ * Called when the user navigates backward from Step 4.
+ * Flushes the pending queue; in-flight calls complete but results are
+ * discarded or marked stale depending on summary state at completion time.
+ */
+function onLeaveRagWorkshop() {
+    _ragCallQueue = [];
+}
+
+/**
+ * Populates the Step 5 (Review & Commit) summary rows from current wizard state.
+ * Called each time the user enters Step 5 so it reflects any Back edits.
+ */
+function populateStep5Summary() {
     const context = SillyTavern.getContext();
     const rawTurns = parseInt($('#chz-turns').val(), 10);
     const turnsToCarry = Math.max(MIN_TURNS, Math.min(MAX_TURNS, isNaN(rawTurns) ? DEFAULT_TURNS_N : rawTurns));
@@ -1188,9 +1627,9 @@ function populateStep4Summary() {
     const pendingText = pendingLb > 0
         ? ` \u26a0 ${pendingLb} suggestion${pendingLb !== 1 ? 's' : ''} pending review`
         : '';
-    $('#chz-step4-target').text(`Target: ${_cloneName} (${mode})`);
-    $('#chz-step4-context').text(`Context: ${lastN.length} messages being carried (${turnsToCarry} turns)`);
-    $('#chz-step4-lore').text(`Lore: ${loreLabel} staged for update/creation${pendingText}`);
+    $('#chz-step5-target').text(`Target: ${_cloneName} (${mode})`);
+    $('#chz-step5-context').text(`Context: ${lastN.length} messages being carried (${turnsToCarry} turns)`);
+    $('#chz-step5-lore').text(`Lore: ${loreLabel} staged for update/creation${pendingText}`);
     populateRagPanel();
 }
 
@@ -2217,7 +2656,7 @@ async function onConfirmClick() {
     const newDescription = `${cardText}${SITUATION_SEP}${situationText}`;
 
     $('#chz-confirm, #chz-cancel, #chz-move-back').prop('disabled', true);
-    $('#chz-error-4').addClass('chz-hidden').text('');
+    $('#chz-error-5').addClass('chz-hidden').text('');
     showReceiptsPanel();
 
     // Capture context and chat data before any character-switching operations
@@ -2262,7 +2701,7 @@ async function onConfirmClick() {
 
         } catch (err) {
             upsertReceiptItem('chz-receipt-card', receiptFailure(`Card save failed: ${err.message}`));
-            $('#chz-error-4').text(err.message).removeClass('chz-hidden');
+            $('#chz-error-5').text(err.message).removeClass('chz-hidden');
             $('#chz-confirm, #chz-cancel, #chz-move-back').prop('disabled', false);
             return;
         }
@@ -2271,8 +2710,10 @@ async function onConfirmClick() {
     // ── Step 2: RAG Upload ─────────────────────────────────────────────────────
     if (getSettings().enableRag && !_finalizeSteps.ragSaved) {
         try {
-            const situationText = $('#chz-situation-text').val().trim();
-            const ragText       = buildRagDocument(_cloneName, _stagedProsePairs);
+            const ragText     = _ragRawDetached
+                ? $('#chz-rag-raw').val()
+                : buildRagDocument(_ragChunks);
+            if (_ragRawDetached) maybeWarnRawDocument(ragText);
             const ragFileName   = `${_cloneName}.txt`;
             const ragUrl        = await uploadRagFile(ragText, ragFileName);
             // After card save, _cloneAvatarUrl is set for clone mode; chapter mode keeps char.avatar
@@ -2282,12 +2723,12 @@ async function onConfirmClick() {
             _finalizeSteps.ragSaved = true;
             const totalLinked = (extension_settings.character_attachments?.[ragAvatarKey] ?? []).length;
             upsertReceiptItem('chz-receipt-rag', receiptSuccess(
-                `Narrative Memory saved: "${ragFileName}" (${_stagedProsePairs.length} turns)`,
+                `Narrative Memory saved: "${ragFileName}" (${_ragChunks.length} chunks)`,
                 `${totalLinked} Data Bank file${totalLinked !== 1 ? 's' : ''} now linked to this character`,
             ));
         } catch (err) {
             upsertReceiptItem('chz-receipt-rag', receiptFailure(`RAG save failed: ${err.message}`));
-            $('#chz-error-4')
+            $('#chz-error-5')
                 .text(`Character card saved — RAG upload failed: ${err.message}`)
                 .removeClass('chz-hidden');
             $('#chz-confirm, #chz-cancel, #chz-move-back').prop('disabled', false);
@@ -2324,7 +2765,7 @@ async function onConfirmClick() {
                 upsertReceiptItem('chz-receipt-lorebook', receiptFailure(
                     `Lorebook save failed: ${err.message}`,
                 ));
-                $('#chz-error-4')
+                $('#chz-error-5')
                     .text(`Character card (and RAG) already saved — lorebook write failed: ${err.message}`)
                     .removeClass('chz-hidden');
                 $('#chz-confirm, #chz-cancel, #chz-move-back').prop('disabled', false);
@@ -2355,7 +2796,7 @@ async function onConfirmClick() {
             upsertReceiptItem('chz-receipt-chat', receiptFailure(
                 `Chat save failed — retry will attempt this step only`,
             ));
-            $('#chz-error-4')
+            $('#chz-error-5')
                 .text(`Character card, RAG, and lorebook already saved — chat creation failed: ${err.message}`)
                 .removeClass('chz-hidden');
             $('#chz-confirm, #chz-cancel, #chz-move-back').prop('disabled', false);
@@ -2405,7 +2846,7 @@ function escapeRegex(str) {
  */
 function populateRagPanel() {
     if (!getSettings().enableRag) {
-        $('#chz-step4-rag').addClass('chz-hidden');
+        $('#chz-step5-rag').addClass('chz-hidden');
         return;
     }
 
@@ -2453,7 +2894,7 @@ function populateRagPanel() {
         $('#chz-rag-warning').addClass('chz-hidden');
     }
 
-    $('#chz-step4-rag').removeClass('chz-hidden');
+    $('#chz-step5-rag').removeClass('chz-hidden');
 }
 
 function bindSettingsHandlers() {
@@ -2473,6 +2914,22 @@ function bindSettingsHandlers() {
     $('#chz-set-rag').on('change', () => {
         getSettings().enableRag = $('#chz-set-rag').is(':checked');
         saveSettingsDebounced();
+    });
+
+    $('#chz-set-lookback').on('input', () => {
+        const val = parseInt($('#chz-set-lookback').val(), 10);
+        if (!isNaN(val) && val >= MIN_LOOKBACK && val <= MAX_LOOKBACK) {
+            getSettings().classifierLookback = val;
+            saveSettingsDebounced();
+        }
+    });
+
+    $('#chz-set-concurrency').on('input', () => {
+        const val = parseInt($('#chz-set-concurrency').val(), 10);
+        if (!isNaN(val) && val >= MIN_CONCURRENCY && val <= MAX_CONCURRENCY) {
+            getSettings().maxConcurrentCalls = val;
+            saveSettingsDebounced();
+        }
     });
 
     try {
@@ -2530,7 +2987,14 @@ function bindSettingsHandlers() {
 
 function injectSettingsPanel() {
     if ($('.chz-settings-block').length) return;
-    $('#extensions_settings').append(buildSettingsHTML(MIN_TURNS, MAX_TURNS, getSettings(), escapeHtml));
+    $('#extensions_settings').append(
+        buildSettingsHTML(
+            MIN_TURNS, MAX_TURNS,
+            MIN_LOOKBACK, MAX_LOOKBACK,
+            MIN_CONCURRENCY, MAX_CONCURRENCY,
+            getSettings(), escapeHtml,
+        ),
+    );
     bindSettingsHandlers();
 }
 

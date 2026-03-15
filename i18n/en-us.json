@@ -33,6 +33,16 @@
     "chapterize.apply_entry":                  "Apply",
     "chapterize.lb_apply_all_unresolved":      "Apply All Unresolved",
 
+    "chapterize.rag_workshop_title":           "Narrative Memory Workshop",
+    "chapterize.rag_no_summary":               "A Situation Summary is required to generate semantic headers. Return to Step 2 and complete the summary.",
+    "chapterize.rag_disabled":                 "Narrative Memory (RAG) is disabled. Enable it in settings to generate semantic headers for each memory chunk.",
+    "chapterize.rag_tab_sectioned":            "Sectioned",
+    "chapterize.rag_tab_raw":                  "Combined Raw",
+    "chapterize.rag_detached_warn":            "Raw view has been edited. Per-card edits are disabled.",
+    "chapterize.rag_revert_raw":               "Revert Raw",
+    "chapterize.rag_raw_detached_label":       "Raw (edited — sections frozen)",
+    "chapterize.rag_regen_card_title":         "Regenerate this chunk's semantic header",
+
     "chapterize.review_title":                 "Review & Commit",
     "chapterize.rag_panel_label":              "Narrative Memory (RAG)",
     "chapterize.receipts_title":               "Commit Receipts",
@@ -43,10 +53,9 @@
     "chapterize.finalize":                     "Finalize",
 
     "chapterize.settings_title":               "Chapterize",
+    "chapterize.settings_general_header":      "General Settings",
     "chapterize.settings_turns_label":         "Turns to carry over (default)",
     "chapterize.settings_store_changelog":     "Store changelog",
-    "chapterize.settings_enable_rag":          "Enable Narrative Memory (RAG)",
-    "chapterize.settings_enable_rag_hint":     "On Finalize, upload the chapter transcript as a Data Bank file attached to the character. Requires a vector embedding source to be configured in SillyTavern.",
     "chapterize.settings_profile_label":       "Connection Profile",
     "chapterize.settings_profile_hint":        "Override the active connection for Chapterize AI calls. Leave on default to use the global connection.",
     "chapterize.settings_card_prompt":         "Card/Suggestions prompt (before content)",
@@ -55,5 +64,12 @@
     "chapterize.settings_situation_prompt_aft":"Situation prompt (after content)",
     "chapterize.settings_lorebook_prompt":     "Lorebook prompt (before content)",
     "chapterize.settings_lorebook_prompt_aft": "Lorebook prompt (after content)",
+    "chapterize.settings_rag_header":          "Narrative Memory (RAG) Settings",
+    "chapterize.settings_enable_rag":          "Enable Narrative Memory (RAG)",
+    "chapterize.settings_enable_rag_hint":     "On Finalize, upload the chapter transcript as a Data Bank file attached to the character. Requires a vector embedding source to be configured in SillyTavern.",
+    "chapterize.settings_lookback_label":      "AI Context Look-back (turns)",
+    "chapterize.settings_lookback_hint":       "How many dialogue turns preceding each chunk are sent to the AI as context-only when generating semantic headers. 0 = no look-back.",
+    "chapterize.settings_concurrency_label":   "Max Concurrent Classifier Calls",
+    "chapterize.settings_concurrency_hint":    "Maximum number of simultaneous AI calls when classifying memory chunks. Higher values are faster but may hit rate limits.",
     "chapterize.reset":                        "Reset"
 }

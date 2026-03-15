@@ -546,7 +546,97 @@
     padding-left: 16px;
 }
 
-/* ─── Step 4 RAG Panel ───────────────────────────────────────────────────── */
+/* ─── Settings Section Headers ───────────────────────────────────────────── */
+
+.chz-settings-section-header {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--chz-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 8px 0 2px;
+    border-top: 1px solid var(--chz-modal-border);
+    margin-top: 4px;
+}
+
+/* ─── RAG Workshop (Step 4) ──────────────────────────────────────────────── */
+
+.chz-rag-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 420px;
+    overflow-y: auto;
+}
+
+.chz-rag-card {
+    border: 1px solid var(--chz-modal-border);
+    border-radius: var(--chz-input-radius);
+    padding: 8px 10px;
+    background: rgba(255, 255, 255, 0.02);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    transition: border-color 0.15s ease;
+}
+
+.chz-rag-card[data-status="stale"] {
+    border-color: rgba(240, 192, 64, 0.45);
+}
+
+.chz-rag-card[data-status="in-flight"] {
+    border-color: rgba(92, 133, 214, 0.45);
+}
+
+.chz-rag-card-header-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.chz-rag-card-header {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.82rem;
+    font-weight: 500;
+}
+
+.chz-rag-card-header:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.chz-rag-card-spinner {
+    font-size: 0.72rem;
+    color: var(--chz-text-muted);
+    flex-shrink: 0;
+}
+
+.chz-rag-queue-label {
+    font-size: 0.7rem;
+    color: var(--chz-text-muted);
+    flex-shrink: 0;
+    font-style: italic;
+}
+
+.chz-rag-card-body {
+    font-size: 0.78rem;
+    color: var(--chz-text-muted);
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.4;
+    max-height: 110px;
+    overflow-y: auto;
+    border-top: 1px solid var(--chz-modal-border);
+    padding-top: 6px;
+}
+
+/* Detached raw textarea amber border */
+#chz-rag-raw.chz-rag-detached {
+    border-color: var(--chz-warn-fg);
+}
+
+/* ─── Step 5 RAG Panel ───────────────────────────────────────────────────── */
 
 .chz-rag-panel {
     display: flex;

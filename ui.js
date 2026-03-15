@@ -1,6 +1,6 @@
 /**
  * @file data/default-user/extensions/chapterize/ui.js
- * @stamp {"utc":"2026-03-14T00:00:00.000Z"}
+ * @stamp {"utc":"2026-03-15T00:00:00.000Z"}
  * @architectural-role HTML Builder
  * @description
  * Builds and returns HTML strings for the Chapterize wizard modal and the
@@ -16,7 +16,7 @@
  * @api-declaration
  * Exported symbols:
  *   buildModalHTML(minTurns, maxTurns, defaultTurns) → string
- *   buildSettingsHTML(minTurns, maxTurns, settings, escapeHtml) → string
+ *   buildSettingsHTML(minTurns, maxTurns, minLookback, maxLookback, minConcurrency, maxConcurrency, settings, escapeHtml) → string
  * @contract
  *   assertions:
  *     purity: pure # No side effects; same inputs always produce same output.
@@ -197,15 +197,55 @@ export function buildModalHTML(minTurns, maxTurns, defaultTurns) {
       <div id="lbchz-error" class="chz-error-banner chz-hidden"></div>
     </div>
 
-    <!-- ── Step 4: Review & Commit ── -->
+    <!-- ── Step 4: Narrative Memory Workshop ── -->
     <div id="chz-step-4" class="chz-step chz-hidden">
+      <h3 class="chz-title" data-i18n="chapterize.rag_workshop_title">Narrative Memory Workshop</h3>
+
+      <!-- No-summary warning (shown when summary is empty or errored) -->
+      <div id="chz-rag-no-summary" class="chz-warn chz-hidden"
+           data-i18n="chapterize.rag_no_summary">A Situation Summary is required to generate semantic headers. Return to Step 2 and complete the summary.</div>
+
+      <!-- RAG disabled notice -->
+      <div id="chz-rag-disabled" class="chz-warn chz-hidden"
+           data-i18n="chapterize.rag_disabled">Narrative Memory (RAG) is disabled. Enable it in settings to generate semantic headers for each memory chunk.</div>
+
+      <!-- Detached-raw warning shown in Sectioned tab -->
+      <div id="chz-rag-detached-warn" class="chz-warn chz-warn-amber chz-hidden"
+           data-i18n="chapterize.rag_detached_warn">Raw view has been edited. Per-card edits are disabled.</div>
+      <div id="chz-rag-detached-revert" class="chz-buttons chz-buttons-left chz-hidden">
+        <button id="chz-rag-revert-raw-btn" class="chz-btn chz-btn-secondary chz-btn-sm"
+                data-i18n="chapterize.rag_revert_raw">Revert Raw</button>
+      </div>
+
+      <div class="chz-tab-bar" id="chz-rag-tab-bar">
+        <button class="chz-tab-btn chz-tab-active" data-tab="sectioned"
+                data-i18n="chapterize.rag_tab_sectioned">Sectioned</button>
+        <button class="chz-tab-btn" data-tab="raw"
+                data-i18n="chapterize.rag_tab_raw">Combined Raw</button>
+      </div>
+
+      <!-- Sectioned view -->
+      <div id="chz-rag-tab-sectioned" class="chz-tab-panel">
+        <div id="chz-rag-cards" class="chz-rag-cards"></div>
+      </div>
+
+      <!-- Combined Raw view -->
+      <div id="chz-rag-tab-raw" class="chz-tab-panel chz-hidden">
+        <div id="chz-rag-raw-detached-label" class="chz-warn chz-warn-amber chz-hidden"
+             data-i18n="chapterize.rag_raw_detached_label">Raw (edited — sections frozen)</div>
+        <textarea id="chz-rag-raw" class="chz-textarea chz-textarea-tall" spellcheck="false"></textarea>
+      </div>
+    </div>
+
+    <!-- ── Step 5: Review & Commit ── -->
+    <div id="chz-step-5" class="chz-step chz-hidden">
       <h3 class="chz-title" data-i18n="chapterize.review_title">Review &amp; Commit</h3>
 
-      <div id="chz-step4-summary" class="chz-step4-summary">
-        <div id="chz-step4-target"  class="chz-step4-row"></div>
-        <div id="chz-step4-context" class="chz-step4-row"></div>
-        <div id="chz-step4-lore"    class="chz-step4-row"></div>
-        <div id="chz-step4-rag" class="chz-rag-panel chz-hidden">
+      <div id="chz-step5-summary" class="chz-step4-summary">
+        <div id="chz-step5-target"  class="chz-step4-row"></div>
+        <div id="chz-step5-context" class="chz-step4-row"></div>
+        <div id="chz-step5-lore"    class="chz-step4-row"></div>
+        <div id="chz-step5-rag" class="chz-rag-panel chz-hidden">
           <span class="chz-label" data-i18n="chapterize.rag_panel_label">Narrative Memory (RAG)</span>
           <div id="chz-rag-timeline" class="chz-rag-timeline"></div>
           <div id="chz-rag-warning" class="chz-warn chz-hidden"></div>
@@ -217,7 +257,7 @@ export function buildModalHTML(minTurns, maxTurns, defaultTurns) {
         <div id="chz-receipts-content" class="chz-receipts-content"></div>
       </div>
 
-      <div id="chz-error-4" class="chz-error-banner chz-hidden"></div>
+      <div id="chz-error-5" class="chz-error-banner chz-hidden"></div>
     </div>
 
     <!-- ── Shared Wizard Footer ── -->
@@ -236,11 +276,15 @@ export function buildModalHTML(minTurns, maxTurns, defaultTurns) {
  * Returns the settings panel HTML for the Chapterize extension.
  * @param {number} minTurns
  * @param {number} maxTurns
+ * @param {number} minLookback
+ * @param {number} maxLookback
+ * @param {number} minConcurrency
+ * @param {number} maxConcurrency
  * @param {object} settings  Current extension settings object (read-only).
  * @param {Function} escapeHtml  HTML-escape utility passed from caller.
  * @returns {string}
  */
-export function buildSettingsHTML(minTurns, maxTurns, settings, escapeHtml) {
+export function buildSettingsHTML(minTurns, maxTurns, minLookback, maxLookback, minConcurrency, maxConcurrency, settings, escapeHtml) {
     const s = settings;
     return `
 <div class="chz-settings-block inline-drawer">
@@ -250,6 +294,9 @@ export function buildSettingsHTML(minTurns, maxTurns, settings, escapeHtml) {
   </div>
   <div class="inline-drawer-content">
     <div class="chz-settings-group">
+
+      <!-- ── General Settings ── -->
+      <div class="chz-settings-section-header" data-i18n="chapterize.settings_general_header">General Settings</div>
 
       <div class="chz-settings-row">
         <label for="chz-set-turns" data-i18n="chapterize.settings_turns_label">Turns to carry over (default)</label>
@@ -262,14 +309,6 @@ export function buildSettingsHTML(minTurns, maxTurns, settings, escapeHtml) {
           <input id="chz-set-changelog" type="checkbox" ${s.storeChangelog ? 'checked' : ''}>
           <span data-i18n="chapterize.settings_store_changelog">Store changelog</span>
         </label>
-      </div>
-
-      <div class="chz-settings-row">
-        <label>
-          <input id="chz-set-rag" type="checkbox" ${s.enableRag ? 'checked' : ''}>
-          <span data-i18n="chapterize.settings_enable_rag">Enable Narrative Memory (RAG)</span>
-        </label>
-        <small data-i18n="chapterize.settings_enable_rag_hint" style="opacity:0.7">On Finalize, upload the chapter transcript as a Data Bank file attached to the character. Requires a vector embedding source to be configured in SillyTavern.</small>
       </div>
 
       <div class="chz-settings-row">
@@ -336,6 +375,31 @@ export function buildSettingsHTML(minTurns, maxTurns, settings, escapeHtml) {
                   data-i18n="chapterize.reset">Reset</button>
         </div>
         <textarea id="chz-set-prompt-lorebook-aft" class="chz-settings-textarea">${escapeHtml(s.lorebookPromptAft)}</textarea>
+      </div>
+
+      <!-- ── Narrative Memory (RAG) Settings ── -->
+      <div class="chz-settings-section-header" data-i18n="chapterize.settings_rag_header">Narrative Memory (RAG) Settings</div>
+
+      <div class="chz-settings-row">
+        <label>
+          <input id="chz-set-rag" type="checkbox" ${s.enableRag ? 'checked' : ''}>
+          <span data-i18n="chapterize.settings_enable_rag">Enable Narrative Memory (RAG)</span>
+        </label>
+        <small data-i18n="chapterize.settings_enable_rag_hint" style="opacity:0.7">On Finalize, upload the chapter transcript as a Data Bank file attached to the character. Requires a vector embedding source to be configured in SillyTavern.</small>
+      </div>
+
+      <div class="chz-settings-row">
+        <label for="chz-set-lookback" data-i18n="chapterize.settings_lookback_label">AI Context Look-back (turns)</label>
+        <input id="chz-set-lookback" type="number"
+               min="${minLookback}" max="${maxLookback}" value="${s.classifierLookback}">
+        <small data-i18n="chapterize.settings_lookback_hint" style="opacity:0.7">How many dialogue turns preceding each chunk are sent to the AI as context-only when generating semantic headers. 0 = no look-back.</small>
+      </div>
+
+      <div class="chz-settings-row">
+        <label for="chz-set-concurrency" data-i18n="chapterize.settings_concurrency_label">Max Concurrent Classifier Calls</label>
+        <input id="chz-set-concurrency" type="number"
+               min="${minConcurrency}" max="${maxConcurrency}" value="${s.maxConcurrentCalls}">
+        <small data-i18n="chapterize.settings_concurrency_hint" style="opacity:0.7">Maximum number of simultaneous AI calls when classifying memory chunks. Higher values are faster but may hit rate limits.</small>
       </div>
 
     </div>
