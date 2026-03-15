@@ -1427,6 +1427,7 @@ function injectModal() {
 
     // Step 2 — Situation Workshop
     $('#chz-regen-situation').on('click', onRegenSituationClick);
+    $('#chz-situation-text').on('input', autoResizeSituationText);
 
     // Step 3 — Lorebook Workshop
     $('#lbchz-regen').on('click',                 onLbRegenClick);
@@ -2168,9 +2169,17 @@ function populateSuggestions(text) {
     }
 }
 
+function autoResizeSituationText() {
+    const el = document.getElementById('chz-situation-text');
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = el.scrollHeight + 'px';
+}
+
 function populateSituation(text) {
     setSituationLoading(false);
     $('#chz-situation-text').val(text);
+    autoResizeSituationText();
 }
 
 function showSuggestionsError(message) {

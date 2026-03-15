@@ -184,6 +184,13 @@
     cursor: not-allowed;
 }
 
+#chz-situation-text {
+    height: auto;
+    min-height: var(--chz-textarea-h);
+    overflow: hidden;
+    resize: none;
+}
+
 /* ─── Turns Row ──────────────────────────────────────────────────────────── */
 
 .chz-turns-row {
