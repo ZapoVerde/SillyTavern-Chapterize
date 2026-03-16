@@ -252,6 +252,10 @@ export function buildModalHTML(minTurns, maxTurns, defaultTurns) {
         </div>
       </div>
 
+      <div id="chz-repair-warning" class="chz-warn chz-warn-amber chz-hidden">
+        &#9888; <strong>REPAIR MODE:</strong> Finalizing will overwrite the character card and reset the chapter chat file. Any messages sent in the chapter chat after its original creation will be permanently deleted.
+      </div>
+
       <div id="chz-receipts" class="chz-receipts chz-hidden">
         <div class="chz-receipts-title" data-i18n="chapterize.receipts_title">Commit Receipts</div>
         <div id="chz-receipts-content" class="chz-receipts-content"></div>
@@ -375,6 +379,17 @@ export function buildSettingsHTML(minTurns, maxTurns, minLookback, maxLookback, 
                   data-i18n="chapterize.reset">Reset</button>
         </div>
         <textarea id="chz-set-prompt-lorebook-aft" class="chz-settings-textarea">${escapeHtml(s.lorebookPromptAft)}</textarea>
+      </div>
+
+      <!-- ── Maintenance ── -->
+      <div class="chz-settings-section-header">Maintenance</div>
+
+      <div class="chz-settings-row">
+        <button id="chz-repair-btn" class="chz-btn chz-btn-secondary"
+                style="border-color: var(--warning, orange); color: var(--warning, orange);">
+          &#x1F527; Repair Last Chapterize
+        </button>
+        <small style="opacity:0.7">Re-opens the wizard from the last Chapterize snapshot. Fixes vector errors by replacing the old RAG file and resets the chapter chat to turn 0. Requires the original source chat to still exist.</small>
       </div>
 
       <!-- ── Narrative Memory (RAG) Settings ── -->

@@ -187,7 +187,7 @@
 #chz-rag-raw {
     height: auto;
     min-height: var(--chz-textarea-h-tall);
-    overflow: hidden;
+    overflow-y: auto; 
     resize: none;
 }
 

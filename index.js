@@ -281,6 +281,15 @@ let _currentStep     = 1;    // active wizard step (1–5)
 let _lorebookRawText = '';   // buffered AI result text for Step 3 freeform
 let _lorebookRawError = '';  // buffered AI error message for Step 3
 
+// ─── Repair Mode State ────────────────────────────────────────────────────────
+// Cleared on closeModal. _repairSourceMessages holds the fetched source chat
+// array so buildLastN can re-slice it with the user's chosen turns value.
+
+let _isRepairMode         = false;  // true while the repair wizard is open
+let _sourceChatId         = '';     // filename (no .jsonl) of the chat being closed
+let _lastRagUrl           = '';     // server path of the most recently uploaded RAG file
+let _repairSourceMessages = [];     // source chat messages fetched in onRepairClick
+
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
 function getSettings() {
@@ -1367,7 +1376,7 @@ function onRagTabSwitch(tabName) {
 
     if (tabName === 'raw' && !_ragRawDetached) {
         $('#chz-rag-raw').val(compileRagFromChunks());
-        autoResizeRagRaw();
+        requestAnimationFrame(() => autoResizeRagRaw());
     }
 }
 
@@ -1515,6 +1524,10 @@ function closeModal() {
     _activeIngesterIndex     = 0;
     _chapterName             = '';
     _cloneAvatarUrl          = '';
+    _isRepairMode            = false;
+    _lastRagUrl              = '';
+    _sourceChatId            = '';
+    _repairSourceMessages    = [];
     _suggestionsLoading      = false;
     _situationLoading        = false;
     _isChapterMode           = false;
@@ -1668,6 +1681,13 @@ function onEnterRagWorkshop() {
         return;
     }
     hideRagNoSummaryMessage();
+    
+    // we must ensure it's populated and sized correctly.
+    const activeTab = $('#chz-rag-tab-bar .chz-tab-active').data('tab') ?? 'sectioned';
+    if (activeTab === 'raw' && !_ragRawDetached) {
+        $('#chz-rag-raw').val(compileRagFromChunks());
+        requestAnimationFrame(() => autoResizeRagRaw());
+    }
 
     // Detect summary change since last batch of calls
     const summaryChanged = _lastSummaryUsedForRag !== null && _lastSummaryUsedForRag !== summaryText;
@@ -1702,20 +1722,23 @@ function onLeaveRagWorkshop() {
  * Called each time the user enters Step 5 so it reflects any Back edits.
  */
 function populateStep5Summary() {
-    const context = SillyTavern.getContext();
-    const rawTurns = parseInt($('#chz-turns').val(), 10);
+    const rawTurns     = parseInt($('#chz-turns').val(), 10);
     const turnsToCarry = Math.max(MIN_TURNS, Math.min(MAX_TURNS, isNaN(rawTurns) ? DEFAULT_TURNS_N : rawTurns));
-    const lastN = buildLastN(context.chat ?? [], turnsToCarry);
-    const loreCount = countDraftChanges();
-    const mode = _isChapterMode ? 'edit-in-place' : 'clone';
-    const loreLabel = loreCount === 1 ? '1 entry' : `${loreCount} entries`;
-    const pendingLb = _lorebookSuggestions.filter(s => !s._applied && !s._rejected).length;
-    const pendingText = pendingLb > 0
+    // In repair mode use the fetched source messages; otherwise use the live chat.
+    const sourceForLastN = _isRepairMode ? _repairSourceMessages : (SillyTavern.getContext().chat ?? []);
+    const lastN          = buildLastN(sourceForLastN, turnsToCarry);
+    const loreCount      = countDraftChanges();
+    const mode           = _isRepairMode ? 'repair' : _isChapterMode ? 'edit-in-place' : 'clone';
+    const loreLabel      = loreCount === 1 ? '1 entry' : `${loreCount} entries`;
+    const pendingLb      = _lorebookSuggestions.filter(s => !s._applied && !s._rejected).length;
+    const pendingText    = pendingLb > 0
         ? ` \u26a0 ${pendingLb} suggestion${pendingLb !== 1 ? 's' : ''} pending review`
         : '';
     $('#chz-step5-target').text(`Target: ${_cloneName} (${mode})`);
     $('#chz-step5-context').text(`Context: ${lastN.length} messages being carried (${turnsToCarry} turns)`);
     $('#chz-step5-lore').text(`Lore: ${loreLabel} staged for update/creation${pendingText}`);
+    // Show destructive-action warning in repair mode
+    $('#chz-repair-warning').toggleClass('chz-hidden', !_isRepairMode);
     populateRagPanel();
 }
 
@@ -2620,6 +2643,7 @@ async function onChapterizeClick() {
     }
 
     const char   = context.characters[context.characterId];
+    _sourceChatId = char.chat ?? '';
     const parsed = parseChapter(char.name);
     _isChapterMode = parsed.isChapter;
     _nextChNum     = parsed.chNum + 1;
@@ -2680,6 +2704,97 @@ async function onChapterizeClick() {
             _lorebookRawError = err.message;
             showLbError(`Generation failed: ${err.message}`);
         });
+}
+
+/**
+ * @section Repair Mode (Entry Point)
+ * @architectural-role Workflow Controller
+ * @description
+ * Inflates the wizard from the lastSnapshot without firing new AI calls.
+ * Fetches the original source chat so the turns slider is fully functional.
+ * All session variables are set AFTER initWizardSession() so they are not
+ * cleared by its reset logic.
+ * @contract
+ *   assertions:
+ *     purity: impure
+ *     state_ownership: [_isRepairMode, _transcript, _stagedProsePairs,
+ *       _repairSourceMessages, _originalDescription, _priorSituation,
+ *       _chapterName, _cloneAvatarUrl, _cloneName, _lorebookName]
+ *     external_io: [/api/chats/get, lbEnsureLorebook]
+ */
+async function onRepairClick() {
+    const snapshot = getSettings().lastSnapshot;
+    if (!snapshot) {
+        toastr.error('No previous Chapterize to repair. Run a Chapterize first.');
+        return;
+    }
+
+    // Fetch the source chat messages so the turns slider is fully operative
+    // and the transcript / prose-pairs can be rebuilt from live data.
+    let sourceMessages;
+    try {
+        const res = await fetch('/api/chats/get', {
+            method:  'POST',
+            headers: getRequestHeaders(),
+            body:    JSON.stringify({
+                ch_name:    snapshot.sourceCharName,
+                file_name:  snapshot.sourceChatId,
+                avatar_url: snapshot.sourceAvatar,
+            }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        sourceMessages = await res.json();
+        if (!Array.isArray(sourceMessages) || sourceMessages.length === 0) {
+            throw new Error('Response was empty or not a chat array.');
+        }
+    } catch (err) {
+        toastr.error('Cannot repair: source chat file is missing or unavailable.');
+        console.error('[Chapterize] Repair: source chat fetch failed:', err);
+        return;
+    }
+
+    // ── 1. Flag + session wipe ─────────────────────────────────────────────────
+    _isRepairMode = true;
+    initWizardSession();   // clears all _ vars and resets UI to blank state
+
+    // ── 2. Inflate session state from snapshot + fetched source ────────────────
+    // Must happen AFTER initWizardSession() so these are not overwritten.
+    _repairSourceMessages = sourceMessages;
+    _transcript           = buildTranscript(sourceMessages);
+    _stagedProsePairs     = buildProsePairs(sourceMessages);
+    _originalDescription  = snapshot.originalDescription;
+    _priorSituation       = snapshot.priorSituation ?? '';
+    _chapterName          = snapshot.targetChatId;
+    _cloneAvatarUrl       = snapshot.targetAvatar;
+    _cloneName            = snapshot.cloneName;
+    _lorebookName         = snapshot.lorebookName;
+
+    // ── 3. Post-inflation UI corrections ──────────────────────────────────────
+    // initWizardSession() rendered titles/card-text with blanks; overwrite now.
+    $('#chz-card-text').val(_originalDescription);
+    $('#lbchz-title').text(`Lorebook: ${_lorebookName}`);
+    $('#chz-step1-title').text(`Repair: ${_cloneName}`).css('color', 'var(--warning, orange)');
+    $('#chz-confirm').css('color', 'var(--warning, orange)');
+
+    // ── 4. Hydrate Steps 1 & 2 from snapshot (no AI calls) ────────────────────
+    populateSuggestions(snapshot.aiRawBio ?? '');
+    populateSituation(snapshot.stagedSituation ?? '');
+
+    // ── 5. Lorebook: fetch server data for Step 3 (no AI call needed) ─────────
+    lbEnsureLorebook(_lorebookName)
+        .then(data => {
+            _lorebookData  = data;
+            if (!_draftLorebook) _draftLorebook = structuredClone(data);
+            setLbLoading(false);
+        })
+        .catch(err => {
+            console.error('[Chapterize] Repair: lorebook fetch failed:', err);
+            setLbLoading(false);
+        });
+
+    // ── 6. Launch modal ────────────────────────────────────────────────────────
+    showModal();
+    updateWizard(1);
 }
 
 function onRegenSuggestionsClick() {
@@ -2753,16 +2868,38 @@ async function onConfirmClick() {
     $('#chz-error-5').addClass('chz-hidden').text('');
     showReceiptsPanel();
 
-    // Capture context and chat data before any character-switching operations
-    const context      = SillyTavern.getContext();
-    const char         = context.characters[context.characterId];
-    const chatMetadata = context.chatMetadata;
-    const lastN        = buildLastN(context.chat, turnsToCarry);
+    // Capture context and chat data before any character-switching operations.
+    // In repair mode, chatMetadata and lastN come from the snapshot / fetched source.
+    const context = SillyTavern.getContext();
+    const char    = context.characters[context.characterId];
+    let chatMetadata;
+    let lastN;
+    if (_isRepairMode) {
+        const snapshot = getSettings().lastSnapshot;
+        chatMetadata   = snapshot.chatMetadata;
+        lastN          = buildLastN(_repairSourceMessages, turnsToCarry);
+    } else {
+        chatMetadata = context.chatMetadata;
+        lastN        = buildLastN(context.chat, turnsToCarry);
+    }
 
     // ── Step 1: Card Save ──────────────────────────────────────────────────────
     if (!_finalizeSteps.cardSaved) {
         try {
-            if (_isChapterMode) {
+            if (_isRepairMode) {
+                // Repair mode: surgical overwrite of the existing chapter card.
+                // Skip name-regex and clone creation — target is known from snapshot.
+                const snapshot   = getSettings().lastSnapshot;
+                const allChars   = SillyTavern.getContext().characters;
+                const targetChar = allChars.find(c => c.avatar === snapshot.targetAvatar);
+                if (!targetChar) throw new Error('Repair failed: target character card not found.');
+                await saveCharacter(targetChar, newDescription, _cloneName);
+                await getCharacters();
+                const freshCtx = SillyTavern.getContext();
+                const idx = freshCtx.characters.findIndex(c => c.avatar === snapshot.targetAvatar);
+                if (idx === -1) throw new Error('Character was saved but could not be located after reload.');
+                await selectCharacterById(idx);
+            } else if (_isChapterMode) {
                 // Chapter mode: save description + bump display name in place.
                 // Sequential: derive name only after save succeeds, so a save
                 // failure does not leave _chapterName set to a stale value.
@@ -2785,10 +2922,10 @@ async function onConfirmClick() {
             }
 
             _finalizeSteps.cardSaved = true;
-            persistChangelog(_chapterName);
+            if (!_isRepairMode) persistChangelog(_chapterName);
             upsertReceiptItem('chz-receipt-card', receiptSuccess(
                 `Character card saved as "${_cloneName}"`,
-                'further edits will overwrite this on retry',
+                _isRepairMode ? 'repair overwrote existing card' : 'further edits will overwrite this on retry',
             ));
             // Relabel Cancel → Close once any step has committed
             $('#chz-cancel').text('Close');
@@ -2804,15 +2941,40 @@ async function onConfirmClick() {
     // ── Step 2: RAG Upload ─────────────────────────────────────────────────────
     if (getSettings().enableRag && !_finalizeSteps.ragSaved) {
         try {
-            const ragText     = _ragRawDetached
+            const ragText    = _ragRawDetached
                 ? $('#chz-rag-raw').val()
                 : buildRagDocument(_ragChunks);
             if (_ragRawDetached) maybeWarnRawDocument(ragText);
-            const ragFileName   = `${_cloneName}.txt`;
-            const ragUrl        = await uploadRagFile(ragText, ragFileName);
-            // After card save, _cloneAvatarUrl is set for clone mode; chapter mode keeps char.avatar
-            const ragAvatarKey  = _isChapterMode ? char.avatar : _cloneAvatarUrl;
-            const ragByteSize   = new TextEncoder().encode(ragText).length;
+            const ragFileName = `${_cloneName}.txt`;
+
+            if (_isRepairMode) {
+                const snapshot = getSettings().lastSnapshot;
+                if (snapshot.ragFileUrl) {
+                    // Physical deletion of the old file so the server reuses the
+                    // original filename on re-upload (no "(1).txt" versioning).
+                    try {
+                        await fetch('/api/files/delete', {
+                            method:  'POST',
+                            headers: getRequestHeaders(),
+                            body:    JSON.stringify({ path: snapshot.ragFileUrl }),
+                        });
+                    } catch (_) { /* file may already be gone — continue */ }
+                    // Scrub the dead URL from the character's attachment list
+                    const attachments = extension_settings.character_attachments;
+                    if (attachments?.[snapshot.targetAvatar]) {
+                        attachments[snapshot.targetAvatar] = attachments[snapshot.targetAvatar]
+                            .filter(a => a.url !== snapshot.ragFileUrl);
+                    }
+                }
+            }
+
+            const ragUrl      = await uploadRagFile(ragText, ragFileName);
+            _lastRagUrl       = ragUrl;
+            // Avatar key: repair uses snapshot target; otherwise standard logic
+            const ragAvatarKey = _isRepairMode
+                ? getSettings().lastSnapshot.targetAvatar
+                : _isChapterMode ? char.avatar : _cloneAvatarUrl;
+            const ragByteSize = new TextEncoder().encode(ragText).length;
             registerCharacterAttachment(ragAvatarKey, ragUrl, ragFileName, ragByteSize);
             _finalizeSteps.ragSaved = true;
             const totalLinked = (extension_settings.character_attachments?.[ragAvatarKey] ?? []).length;
@@ -2875,16 +3037,20 @@ async function onConfirmClick() {
     // ── Step 4: Chat Save ──────────────────────────────────────────────────────
     if (!_finalizeSteps.chatSaved) {
         try {
-            const freshCtx   = SillyTavern.getContext();
-            const avatarKey  = _isChapterMode ? char.avatar : _cloneAvatarUrl;
-            const freshIdx   = freshCtx.characters.findIndex(c => c.avatar === avatarKey);
+            // Repair mode uses snapshot.targetAvatar; normal mode uses existing logic
+            const avatarKey = _isRepairMode
+                ? getSettings().lastSnapshot.targetAvatar
+                : _isChapterMode ? char.avatar : _cloneAvatarUrl;
+            const freshCtx  = SillyTavern.getContext();
+            const freshIdx  = freshCtx.characters.findIndex(c => c.avatar === avatarKey);
             if (freshIdx === -1) throw new Error('Could not locate character for chat save.');
-            const freshChar  = freshCtx.characters[freshIdx];
+            const freshChar = freshCtx.characters[freshIdx];
 
             await saveNewChat(freshChar, _chapterName, chatMetadata, lastN);
             _finalizeSteps.chatSaved = true;
             upsertReceiptItem('chz-receipt-chat', receiptSuccess(
                 `Chat saved: "${_chapterName}"`,
+                _isRepairMode ? 'chapter chat reset to original turn 0' : undefined,
             ));
         } catch (err) {
             upsertReceiptItem('chz-receipt-chat', receiptFailure(
@@ -2898,9 +3064,36 @@ async function onConfirmClick() {
         }
     }
 
+    // ── Snapshot Save ──────────────────────────────────────────────────────────
+    // Saved after all writes succeed so future Repair Mode has fresh data.
+    // In repair mode, source identity fields are preserved from the existing snapshot.
+    {
+        const prevSnapshot = getSettings().lastSnapshot ?? {};
+        getSettings().lastSnapshot = {
+            sourceChatId:        _isRepairMode ? prevSnapshot.sourceChatId   : _sourceChatId,
+            sourceAvatar:        _isRepairMode ? prevSnapshot.sourceAvatar   : char.avatar,
+            sourceCharName:      _isRepairMode ? prevSnapshot.sourceCharName : char.name,
+            targetChatId:        _chapterName,
+            targetAvatar:        _isRepairMode
+                ? prevSnapshot.targetAvatar
+                : _isChapterMode ? char.avatar : _cloneAvatarUrl,
+            cloneName:           _cloneName,
+            lorebookName:        _lorebookName,
+            originalDescription: _originalDescription,
+            priorSituation:      _priorSituation,
+            aiRawBio:            $('#chz-suggestions-raw').val(),
+            stagedSituation:     $('#chz-situation-text').val(),
+            ragFileUrl:          _lastRagUrl,
+            chatMetadata:        chatMetadata,
+        };
+        saveSettingsDebounced();
+    }
+
     // ── Step 5: Navigate ───────────────────────────────────────────────────────
     try {
-        // For clone mode: switch active character to the new clone before opening chat
+        // Repair mode: _isChapterMode is false and _cloneAvatarUrl = snapshot.targetAvatar,
+        // so this branch fires for all repairs (harmless re-select for chapter-mode originals).
+        // Normal clone mode: same condition, selects the newly created clone.
         if (!_isChapterMode && _cloneAvatarUrl) {
             const freshCtx = SillyTavern.getContext();
             const idx = freshCtx.characters.findIndex(c => c.avatar === _cloneAvatarUrl);
@@ -3004,6 +3197,8 @@ function updateRagSettingsState() {
 }
 
 function bindSettingsHandlers() {
+    $('#chz-repair-btn').on('click', onRepairClick);
+
     $('#chz-set-turns').on('input', () => {
         const val = parseInt($('#chz-set-turns').val(), 10);
         if (!isNaN(val) && val >= MIN_TURNS && val <= MAX_TURNS) {
