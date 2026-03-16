@@ -41,7 +41,7 @@
  * @contract
  *   assertions:
  *     purity: mutates # Modifies module-level session state on each invocation.
- *     state_ownership: [_transcript, _originalDescription, _priorSituation, _stagedProsePairs,
+ *     state_ownership: [_transcript, _originalDescription, _priorSituation, _baseScenario, _stagedProsePairs,
  *       _cardSuggestions, _ingesterSnapshot, _ingesterDebounceTimer,
  *       _activeIngesterIndex, _chapterName, _cloneAvatarUrl, _finalizeSteps,
  *       _isRepairMode, _sourceChatId, _lastRagUrl, _repairSourceMessages,
@@ -220,6 +220,7 @@ const SETTINGS_DEFAULTS = Object.freeze({
 let _transcript              = '';
 let _originalDescription     = '';
 let _priorSituation          = '';
+let _baseScenario            = '';  // text above SITUATION_SEP in char.scenario; preserved on write
 let _stagedProsePairs        = [];  // [{user: msg, ai: msg}] built on click, used at Finalize
 let _suggestionsLoading      = false;
 let _situationLoading        = false;
@@ -703,12 +704,13 @@ function parseChapter(name) {
 function buildCharacterFormData(char, overrides = {}) {
     const name        = overrides.name        ?? char.name;
     const description = overrides.description ?? char.description;
+    const scenario    = overrides.scenario    ?? char.scenario;
 
     const formData = new FormData();
     formData.append('ch_name',                   name);
     formData.append('description',               description);
     formData.append('personality',               char.personality                     ?? '');
-    formData.append('scenario',                  char.scenario                        ?? '');
+    formData.append('scenario',                  scenario                             ?? '');
     formData.append('first_mes',                 char.first_mes                       ?? '');
     formData.append('mes_example',               char.mes_example                     ?? '');
     formData.append('creator_notes',             char.data?.creator_notes             ?? '');
@@ -728,8 +730,8 @@ function buildCharacterFormData(char, overrides = {}) {
  * `sourceChar` but with `newDescription`. Returns the avatar filename string
  * that the server assigned (plain text, e.g. "CharName_.png").
  */
-async function createCharacterClone(sourceChar, cloneName, newDescription) {
-    const formData = buildCharacterFormData(sourceChar, { name: cloneName, description: newDescription });
+async function createCharacterClone(sourceChar, cloneName, newDescription, newScenario) {
+    const formData = buildCharacterFormData(sourceChar, { name: cloneName, description: newDescription, scenario: newScenario });
 
     // Copy the source avatar image so the clone inherits the same portrait.
     try {
@@ -754,9 +756,10 @@ async function createCharacterClone(sourceChar, cloneName, newDescription) {
 
 // ─── Character Save ───────────────────────────────────────────────────────────
 
-async function saveCharacter(char, newDescription, newName = null) {
+async function saveCharacter(char, newDescription, newScenario, newName = null) {
     const updated = structuredClone(char);
     updated.description = newDescription;
+    updated.scenario    = newScenario;
     if (newName) updated.name = newName;
 
     const formData = buildCharacterFormData(updated);
@@ -1536,6 +1539,7 @@ function closeModal() {
     _transcript              = '';
     _originalDescription     = '';
     _priorSituation          = '';
+    _baseScenario            = '';
     _stagedProsePairs        = [];
     _cardSuggestions         = [];
     _ingesterSnapshot        = '';
@@ -2672,11 +2676,15 @@ async function onChapterizeClick() {
         : `${char.name} (Ch1)`;
     _lorebookName  = parsed.baseName;
 
-    // Strip any existing situation block so the card editor shows only the prose.
-    const raw    = char.description ?? '';
-    const sepIdx = raw.indexOf(SITUATION_SEP);
-    _originalDescription = sepIdx !== -1 ? raw.slice(0, sepIdx) : raw;
-    _priorSituation      = sepIdx !== -1 ? raw.slice(sepIdx + SITUATION_SEP.length).trim() : '';
+    // Description is now the pure character bio — no separator lives here.
+    _originalDescription = char.description ?? '';
+
+    // Scenario holds the narrative state: text above the divider is preserved
+    // as _baseScenario; text below seeds _priorSituation for Step 2.
+    const rawScenario    = char.scenario ?? '';
+    const scenSepIdx     = rawScenario.indexOf(SITUATION_SEP);
+    _baseScenario   = (scenSepIdx !== -1 ? rawScenario.slice(0, scenSepIdx) : rawScenario).trimEnd();
+    _priorSituation = scenSepIdx !== -1 ? rawScenario.slice(scenSepIdx + SITUATION_SEP.length).trim() : '';
     _transcript          = buildTranscript(messages);
     _stagedProsePairs    = buildProsePairs(messages);
 
@@ -2783,7 +2791,8 @@ async function onRepairClick() {
     _transcript           = buildTranscript(sourceMessages);
     _stagedProsePairs     = buildProsePairs(sourceMessages);
     _originalDescription  = snapshot.originalDescription;
-    _priorSituation       = snapshot.priorSituation ?? '';
+    _priorSituation       = snapshot.priorSituation  ?? '';
+    _baseScenario         = snapshot.baseScenario    ?? '';
     _chapterName          = snapshot.targetChatId;
     _cloneAvatarUrl       = snapshot.targetAvatar;
     _cloneName            = snapshot.cloneName;
@@ -2878,11 +2887,19 @@ async function onConfirmClick() {
     const rawTurns      = parseInt($('#chz-turns').val(), 10);
     const turnsToCarry  = Math.max(MIN_TURNS, Math.min(MAX_TURNS, isNaN(rawTurns) ? DEFAULT_TURNS_N : rawTurns));
 
-    // Last-resort guard: strip any situation block the user may have pasted in
+    // Last-resort guard: strip any situation block the user may have pasted into the bio box.
     const sepIdx2 = cardText.indexOf(SITUATION_SEP);
     if (sepIdx2 !== -1) cardText = cardText.slice(0, sepIdx2);
 
-    const newDescription = `${cardText}${SITUATION_SEP}${situationText}`;
+    // Defensive guard: if the user pasted a separator + preamble into the situation box,
+    // keep only the text that follows the separator so the scenario field stays clean.
+    const sitSepIdx = situationText.indexOf(SITUATION_SEP);
+    const cleanSituationText = sitSepIdx !== -1 ? situationText.slice(sitSepIdx + SITUATION_SEP.length).trim() : situationText;
+
+    // Description carries only the character bio (Step 1 output).
+    // Scenario carries _baseScenario (original world text) + divider + situation summary.
+    const newDescription = cardText;
+    const newScenario    = `${_baseScenario}${SITUATION_SEP}${cleanSituationText}`;
 
     $('#chz-confirm, #chz-cancel, #chz-move-back').prop('disabled', true);
     $('#chz-error-5').addClass('chz-hidden').text('');
@@ -2913,7 +2930,7 @@ async function onConfirmClick() {
                 const allChars   = SillyTavern.getContext().characters;
                 const targetChar = allChars.find(c => c.avatar === snapshot.targetAvatar);
                 if (!targetChar) throw new Error('Repair failed: target character card not found.');
-                await saveCharacter(targetChar, newDescription, _cloneName);
+                await saveCharacter(targetChar, newDescription, newScenario, _cloneName);
                 await getCharacters();
                 const freshCtx = SillyTavern.getContext();
                 const idx = freshCtx.characters.findIndex(c => c.avatar === snapshot.targetAvatar);
@@ -2923,7 +2940,7 @@ async function onConfirmClick() {
                 // Chapter mode: save description + bump display name in place.
                 // Sequential: derive name only after save succeeds, so a save
                 // failure does not leave _chapterName set to a stale value.
-                await saveCharacter(char, newDescription, _cloneName);
+                await saveCharacter(char, newDescription, newScenario, _cloneName);
                 _chapterName = await deriveChapterName(char.avatar);
                 await getCharacters();
                 const freshCtx = SillyTavern.getContext();
@@ -2932,7 +2949,7 @@ async function onConfirmClick() {
                 await selectCharacterById(idx);
             } else {
                 // Clone mode: create new character card as "CharName (Ch1)".
-                _cloneAvatarUrl = await createCharacterClone(char, _cloneName, newDescription);
+                _cloneAvatarUrl = await createCharacterClone(char, _cloneName, newDescription, newScenario);
                 await getCharacters();
                 const freshCtx = SillyTavern.getContext();
                 if (freshCtx.characters.findIndex(c => c.avatar === _cloneAvatarUrl) === -1) {
@@ -3101,6 +3118,7 @@ async function onConfirmClick() {
             lorebookName:        _lorebookName,
             originalDescription: _originalDescription,
             priorSituation:      _priorSituation,
+            baseScenario:        _baseScenario,
             aiRawBio:            $('#chz-suggestions-raw').val(),
             stagedSituation:     $('#chz-situation-text').val(),
             ragFileUrl:          _lastRagUrl,
