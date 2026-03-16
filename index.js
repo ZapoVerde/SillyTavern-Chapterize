@@ -1,48 +1,50 @@
 /**
  * @file data/default-user/extensions/chapterize/index.js
- * @stamp {"utc":"2026-03-15T00:00:00.000Z"}
+ * @stamp {"utc":"2026-03-16T00:00:00.000Z"}
  * @architectural-role Feature Entry Point
  * @description
  * SillyTavern extension that closes a roleplay chapter using a Draft/Commit
- * architecture. On button click, opens a 5-step wizard modal and fires three
- * AI calls in the background: bio suggestions and situation summary fire
- * immediately; the lorebook AI call fires after the lorebook fetch resolves.
+ * architecture. Orchestrates a 5-step wizard modal to transition narrative
+ * state. Supports standard Chapterize (cloning/updating) and Repair Mode 
+ * (surgical overwrite of the most recent transition).
+ * 
  * Steps:
- * (1) Character Workshop — 3-tab bio editor (Update, Draft Bio, AI Raw);
- * (2) Situation Workshop — situation summary + turns slider;
+ * (1) Character Workshop — 3-tab bio editor with robust multi-paragraph parsing
+ *     that respects the Chapterize Divider as a hard boundary;
+ * (2) Situation Workshop — situation summary + dynamic turns carry-over slider;
  * (3) Lorebook Workshop — diff-based Update tab with freeform AI output,
  *     UID-anchored suggestions, and regen reconciliation;
  * (4) Narrative Memory — RAG document builder with semantic header classification,
- *     sliding-window chunking, concurrency-limited AI calls, and detached raw editing;
- * (5) Review & Commit — pre-flight summary with pending-review guard and
- *     sequential server writes.
- * All edits are staged in memory. On Finalize, changes are committed sequentially:
- *   1. Character card (create clone or edit-in-place)
- *   2. RAG upload — chapter transcript uploaded as a Data Bank file and 
- *      registered in extension_settings.character_attachments for the card
- *   3. Lorebook (deferred bulk write of _draftLorebook)
- *   4. New chapter chat (seeded with last N turns)
- * The Commit Receipts panel tracks step completion for safe retries. Cancel
- * before any commit wipes all state; Cancel after a partial commit relabels to
- * "Close" and keeps receipts visible.
+ *     concurrency-limited AI calls, and detached raw editing;
+ * (5) Review & Commit — pre-flight summary with pending-review guards and
+ *     destructive overwrite warnings when in Repair Mode.
+ * 
  * @core-principles
  * 1. OWNS the full chapterize workflow from button click through new chat open.
  * 2. MUST NOT commit any server write until the user clicks Finalize.
  * 3. DELEGATES all disk persistence to ST server endpoints via fetch.
  * 4. MAINTAINS strict separation between staged section data and raw document views.
+ * 5. SURGICAL OVERWRITE: Repair mode must overwrite existing IDs (cards/chats/files)
+ *    rather than creating versioned duplicates.
+ * 6. SOURCE TRUTH: Repair mode re-fetches the original source chat file to 
+ *    allow full turn-count re-slicing without "copy of a copy" degradation.
+ * 7. THE JANITOR: Repair mode must physically delete orphaned Data Bank files 
+ *    and scrub attachment metadata to prevent "missing vector" warnings.
+ * 
  * @api-declaration
- * Side-effect module — no exported symbols.
- * Entry point: onChapterizeClick() (bound to button).
- * Key internal APIs (Character): parseDescriptionSections, applyDescriptionSection.
+ * Entry points: onChapterizeClick() (standard), onRepairClick() (maintenance).
+ * Key internal APIs (Character): parseDescriptionSections (divider-aware), applyDescriptionSection.
  * Key internal APIs (Lorebook): toVirtualDoc, enrichLbSuggestions, updateLbDiff.
- * Key internal APIs (RAG): buildRagChunks, ragFireChunk, ragDrainQueue, 
- *   uploadRagFile, registerCharacterAttachment.
+ * Key internal APIs (RAG): buildRagChunks, ragFireChunk, uploadRagFile, registerCharacterAttachment.
+ * Key internal APIs (Repair): initWizardSession (reset), onConfirmClick (destructive path).
+ * 
  * @contract
  *   assertions:
  *     purity: mutates # Modifies module-level session state on each invocation.
- *     state_ownership: [_transcript, _originalDescription, _stagedProsePairs,
+ *     state_ownership: [_transcript, _originalDescription, _priorSituation, _stagedProsePairs,
  *       _cardSuggestions, _ingesterSnapshot, _ingesterDebounceTimer,
  *       _activeIngesterIndex, _chapterName, _cloneAvatarUrl, _finalizeSteps,
+ *       _isRepairMode, _sourceChatId, _lastRagUrl, _repairSourceMessages,
  *       _suggestionsGenId, _situationGenId, _lorebookGenId,
  *       _lorebookName, _lorebookData, _draftLorebook, _lorebookLoading,
  *       _lorebookSuggestions, _lbActiveIngesterIndex, _lbDebounceTimer,
@@ -50,7 +52,8 @@
  *       _lorebookRawError, _ragChunks, _ragRawDetached, _lastSummaryUsedForRag, 
  *       _ragInFlightCount, _ragCallQueue, _ragGlobalGenId,
  *       extension_settings.chapterize]
- *     external_io: https_apis # generateWithProfile (LLM) and ST /api/* endpoints.
+ *     external_io: [generateWithProfile, /api/characters/*, /api/worldinfo/*, 
+ *       /api/chats/*, /api/files/*] # Includes physical deletion of Data Bank files.
  */
 
 import { generateRaw, saveSettingsDebounced, getRequestHeaders, openCharacterChat, getCharacters, selectCharacterById, eventSource, event_types, callPopup } from '../../../../script.js';
@@ -1209,12 +1212,23 @@ function isHeaderLine(line) {
  * Pure function — no DOM or module dependencies.
  */
 function parseDescriptionSections(text) {
-    const lines      = text.split('\n');
+    const lines = text.split('\n');
     const rawHeaders = [];
+    let dividerLineIdx = -1;
 
+    // 1. Scan for headers AND the divider simultaneously
     for (let i = 0; i < lines.length; i++) {
-        if (isHeaderLine(lines[i])) {
-            rawHeaders.push({ lineIdx: i, header: stripHeaderDecorators(lines[i]) });
+        const line = lines[i];
+        
+        // Use a trimmed version of SITUATION_SEP for matching 
+        // to avoid newline detection issues
+        if (line.includes('*** Chapterize Divider — Do Not Edit ***')) {
+            dividerLineIdx = i;
+            break; // Stop looking for bio sections once we hit the divider
+        }
+
+        if (isHeaderLine(line)) {
+            rawHeaders.push({ lineIdx: i, header: stripHeaderDecorators(line) });
         }
     }
 
@@ -1226,25 +1240,31 @@ function parseDescriptionSections(text) {
         seenCounts[header] = (seenCounts[header] || 0) + 1;
         const index = seenCounts[header];
 
-        // Content starts after the header; skip an immediately adjacent decorator line
         let startLine = lineIdx + 1;
-        if (startLine < lines.length && isDecoratorLine(lines[startLine])) {
-            startLine++;
+
+        // 2. Determine the hard boundary for this section
+        // It ends at the next header OR the divider, whichever comes first
+        const nextHeaderIdx = i + 1 < rawHeaders.length ? rawHeaders[i + 1].lineIdx : lines.length;
+        
+        let boundaryIdx = nextHeaderIdx;
+        if (dividerLineIdx !== -1 && dividerLineIdx < boundaryIdx) {
+            boundaryIdx = dividerLineIdx;
         }
 
-        // Content ends at the first blank line or the next header, whichever comes first
-        const nextIdx = i + 1 < rawHeaders.length ? rawHeaders[i + 1].lineIdx : lines.length;
+        let endLine = boundaryIdx - 1;
 
-        let endLine;
-        const firstBlank = lines.slice(startLine, nextIdx).findIndex(l => l.trim() === '');
-        if (firstBlank !== -1) {
-            endLine = startLine + firstBlank - 1;
-        } else {
-            // No blank line — walk back past any leading decorator of the next section
-            endLine = nextIdx - 1;
-            if (endLine >= startLine && isDecoratorLine(lines[endLine])) {
-                endLine--;
-            }
+        // 3. Trim leading/trailing blank lines within the section
+        // This makes the diffs much cleaner and prevents "empty" matches
+        while (startLine <= endLine && lines[startLine].trim() === '') {
+            startLine++;
+        }
+        while (endLine >= startLine && lines[endLine].trim() === '') {
+            endLine--;
+        }
+
+        // Handle completely empty sections (header with no text)
+        if (startLine > endLine) {
+            endLine = startLine - 1; 
         }
 
         sections.push({ header, index, headerLine: lineIdx, startLine, endLine });
