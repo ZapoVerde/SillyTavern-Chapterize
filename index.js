@@ -51,6 +51,7 @@
  *       _lorebookFreeformLastParsed, _currentStep, _lorebookRawText,
  *       _lorebookRawError, _ragChunks, _ragRawDetached, _lastSummaryUsedForRag,
  *       _ragInFlightCount, _ragCallQueue, _ragGlobalGenId,
+ *       _splitPairIdx, _splitIndexWhenRagBuilt,
  *       _ledgerManifest, _sessionStartId, _lorebookDelta,
  *       extension_settings.chapterize]
  *     external_io: [generateWithProfile, /api/characters/*, /api/worldinfo/*, 
@@ -280,6 +281,14 @@ let _ragInFlightCount      = 0;    // count of calls currently awaiting a respon
 let _ragCallQueue          = [];   // chunk indices queued but not yet fired
 let _ragGlobalGenId        = 0;    // incremented only on closeModal to kill all in-flight
 
+// ─── Blade State ──────────────────────────────────────────────────────────────
+// The "Blade" enforces zero-overlap between the RAG archive and the carry window.
+// _splitPairIdx is the exclusive upper bound: only _stagedProsePairs[0.._splitPairIdx)
+// are eligible for the RAG file. Everything from that boundary onward is Continuity.
+
+let _splitPairIdx           = 0;    // exclusive upper bound for archive pairs (Blade position)
+let _splitIndexWhenRagBuilt = null; // _splitPairIdx value when _ragChunks were last built; null = never
+
 // ─── Wizard State ─────────────────────────────────────────────────────────────
 
 let _currentStep     = 1;    // active wizard step (1–5)
@@ -435,7 +444,8 @@ async function ragFireChunk(chunkIndex) {
 
     try {
         const contextPairs = _stagedProsePairs.slice(Math.max(0, chunkIndex - lookback), chunkIndex);
-        const targetPairs  = _stagedProsePairs.slice(chunkIndex, chunkIndex + 2);
+        // Clamp to _splitPairIdx so the classifier never reads carry-window pairs
+        const targetPairs  = _stagedProsePairs.slice(chunkIndex, Math.min(chunkIndex + 2, _splitPairIdx));
         const header       = await runRagClassifierCall(summaryAtCall, contextPairs, targetPairs);
 
         const globalStale = _ragGlobalGenId !== globalGenId;
@@ -852,7 +862,41 @@ function buildChatHeader(chatMetadata) {
     };
 }
 
-// ─── Message Slice ────────────────────────────────────────────────────────────
+// ─── Message Slice / Blade ────────────────────────────────────────────────────
+
+/**
+ * Computes the Blade split point: the boundary between Archive (RAG) messages
+ * and Continuity (carry) messages.
+ *
+ * Returns:
+ *   carryMessages  — the slice of non-system messages to carry into the new chat.
+ *   splitValidIdx  — index in the valid-filtered array where the carry window starts.
+ *                    The message at this index is always an AI reply (walkback guarantee).
+ *   splitPairIdx   — exclusive upper bound for _stagedProsePairs that belong to the
+ *                    Archive: only pairs[0 .. splitPairIdx) are eligible for the RAG file.
+ *
+ * Accessing _stagedProsePairs is intentional — this function is module-internal
+ * and _stagedProsePairs is already built before this is ever called.
+ *
+ * @param {object[]} messages     Source message array (may include system messages).
+ * @param {number}   turnsToCarry
+ * @returns {{ carryMessages: object[], splitValidIdx: number, splitPairIdx: number }}
+ */
+function computeSplitIndex(messages, turnsToCarry) {
+    const valid = messages.filter(m => !m.is_system && m.mes !== undefined);
+    const isLastUnmatched = valid.length > 0 && valid[valid.length - 1].is_user;
+    const base = isLastUnmatched ? valid.slice(0, -1) : valid;
+    // Step 1: go back to the N-turns boundary
+    let start = Math.max(0, base.length - turnsToCarry * 2);
+    // Step 2: walk back until we land on an AI reply (Tone Persistence guarantee)
+    while (start > 0 && base[start].is_user) start--;
+    const splitValidIdx = start;
+    // Step 3: map splitValidIdx → pair boundary.
+    // A pair belongs to the Archive iff its AI slot (validIdx + 1) falls before the split.
+    const lastArchivePairIdx = _stagedProsePairs.findLastIndex(p => p.validIdx + 1 < splitValidIdx);
+    const splitPairIdx = lastArchivePairIdx + 1;   // exclusive upper bound
+    return { carryMessages: base.slice(start), splitValidIdx, splitPairIdx };
+}
 
 /**
  * Returns messages starting from the last `turnsToCarry` turn boundary, then
@@ -862,16 +906,7 @@ function buildChatHeader(chatMetadata) {
  * only complete pairs are carried.
  */
 function buildLastN(messages, turnsToCarry) {
-    const valid = messages.filter(m => !m.is_system && m.mes !== undefined);
-    const isLastUnmatched = valid.length > 0 && valid[valid.length - 1].is_user;
-    const base = isLastUnmatched ? valid.slice(0, -1) : valid;
-    // Step 1: go back to the N-turns boundary
-    let start = Math.max(0, base.length - turnsToCarry * 2);
-    // Step 2: walk back from there until we land on an AI reply
-    while (start > 0 && base[start].is_user) {
-        start--;
-    }
-    return base.slice(start);
+    return computeSplitIndex(messages, turnsToCarry).carryMessages;
 }
 
 // ─── Chat Save ────────────────────────────────────────────────────────────────
@@ -1673,6 +1708,10 @@ function initWizardSession() {
     _lorebookRawText  = '';
     _lorebookRawError = '';
 
+    // Blade reset — recalculated on each entry to Step 4
+    _splitPairIdx           = 0;
+    _splitIndexWhenRagBuilt = null;
+
     onWorkshopTabSwitch('ingester');
     setSuggestionsLoading(true);
     setSituationLoading(true);
@@ -1716,9 +1755,25 @@ function onEnterRagWorkshop() {
     const summaryText = $('#chz-situation-text').val().trim();
     const hasError    = !$('#chz-error-2').hasClass('chz-hidden');
 
-    // Build chunks from staged pairs on first entry (or if pairs changed)
-    if (_ragChunks.length === 0 && _stagedProsePairs.length > 0) {
-        _ragChunks = buildRagChunks(_stagedProsePairs);
+    // ── Blade: compute the split from the current slider value ────────────────
+    const rawTurnsRag  = parseInt($('#chz-turns').val(), 10);
+    const turnsRag     = Math.max(MIN_TURNS, Math.min(MAX_TURNS, isNaN(rawTurnsRag) ? DEFAULT_TURNS_N : rawTurnsRag));
+    const sourceRag    = _isRepairMode ? _repairSourceMessages : (SillyTavern.getContext().chat ?? []);
+    const { splitPairIdx: newSplitPairIdx } = computeSplitIndex(sourceRag, turnsRag);
+    _splitPairIdx = newSplitPairIdx;
+
+    // Discard existing chunks if the carry window has shifted since they were built
+    if (_ragChunks.length > 0 && _splitPairIdx !== _splitIndexWhenRagBuilt) {
+        toastr.warning('Carry window has changed — Narrative Memory chunks will be rebuilt.');
+        _ragChunks = [];
+        _splitIndexWhenRagBuilt = null;
+    }
+
+    // Build chunks from archive pairs only (Blade enforcement)
+    const archivePairs = _stagedProsePairs.slice(0, _splitPairIdx);
+    if (_ragChunks.length === 0 && archivePairs.length > 0) {
+        _ragChunks = buildRagChunks(archivePairs);
+        _splitIndexWhenRagBuilt = _splitPairIdx;
         renderRagWorkshop();
     } else if (_ragChunks.length > 0) {
         // Refresh card render in case detached state changed or queue positions shifted
@@ -3269,12 +3324,32 @@ async function onConfirmClick() {
     // In repair mode, chatMetadata comes from the ledger node captured at commit time.
     let chatMetadata;
     let lastN;
-    if (_isRepairMode) {
-        chatMetadata = _ledgerManifest.nodes[_sessionStartId].snapshot.chatMetadata;
-        lastN        = buildLastN(_repairSourceMessages, turnsToCarry);
-    } else {
-        chatMetadata = context.chatMetadata;
-        lastN        = buildLastN(context.chat, turnsToCarry);
+    {
+        const sourceMessages = _isRepairMode ? _repairSourceMessages : (context.chat ?? []);
+        if (_isRepairMode) {
+            chatMetadata = _ledgerManifest.nodes[_sessionStartId].snapshot.chatMetadata;
+        } else {
+            chatMetadata = context.chatMetadata;
+        }
+        const { carryMessages, splitPairIdx } = computeSplitIndex(sourceMessages, turnsToCarry);
+        lastN = carryMessages;
+        _splitPairIdx = splitPairIdx;   // keep Blade state current at finalize time
+
+        // Zero-Overlap assertion: no archive pair may reference a carry-window message.
+        // Guards against off-by-one errors in computeSplitIndex. Development-time only.
+        if (getSettings().enableRag && lastN.length > 0) {
+            const firstCarryMsg  = lastN[0];
+            const archivePairs   = _stagedProsePairs.slice(0, splitPairIdx);
+            const overlapDetected = archivePairs.some(p => p.user === firstCarryMsg || p.ai === firstCarryMsg);
+            console.assert(!overlapDetected, '[CHZ] Blade invariant violated: an archive pair references a carry-window message');
+            if (_splitIndexWhenRagBuilt !== null && splitPairIdx !== _splitIndexWhenRagBuilt) {
+                console.warn(`[CHZ] Blade: _splitPairIdx shifted from ${_splitIndexWhenRagBuilt} (RAG build) to ${splitPairIdx} (finalize) — RAG file may not match carry window.`);
+            }
+            const nonSystem = sourceMessages.filter(m => !m.is_system && m.mes !== undefined);
+            const isLastUm  = nonSystem.length > 0 && nonSystem[nonSystem.length - 1].is_user;
+            const totalBase = isLastUm ? nonSystem.length - 1 : nonSystem.length;
+            console.log(`[CHZ] Blade: archive=${totalBase - lastN.length} carry=${lastN.length} total=${totalBase} rag_pairs=${archivePairs.length}`);
+        }
     }
 
     // ── Step 1: Card Save ──────────────────────────────────────────────────────
