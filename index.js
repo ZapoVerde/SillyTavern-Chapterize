@@ -1635,6 +1635,7 @@ function initWizardSession() {
     $('#chz-error-5').addClass('chz-hidden').text('');
     $('#chz-receipts').addClass('chz-hidden');
     $('#chz-receipts-content').empty();
+    $('#chz-recovery-guide').addClass('chz-hidden');
     $('#chz-cancel').text('Cancel').prop('disabled', false);
     // RAG Workshop reset
     $('#chz-rag-cards').empty();
@@ -2276,6 +2277,11 @@ function showSituationError(message) {
 
 function showReceiptsPanel() {
     $('#chz-receipts').removeClass('chz-hidden');
+}
+
+function showRecoveryGuide() {
+    $('#chz-recovery-guide').removeClass('chz-hidden');
+    $('#chz-cancel').text('Close');
 }
 
 /**
@@ -3303,6 +3309,7 @@ async function onConfirmClick() {
             upsertReceiptItem('chz-receipt-card', receiptFailure(`Card save failed: ${err.message}`));
             $('#chz-error-5').text(err.message).removeClass('chz-hidden');
             $('#chz-confirm, #chz-cancel, #chz-move-back').prop('disabled', false);
+            showRecoveryGuide();
             return;
         }
     }
@@ -3357,6 +3364,7 @@ async function onConfirmClick() {
                 .text(`Character card saved — RAG upload failed: ${err.message}`)
                 .removeClass('chz-hidden');
             $('#chz-confirm, #chz-cancel, #chz-move-back').prop('disabled', false);
+            showRecoveryGuide();
             return;
         }
     }
@@ -3397,6 +3405,7 @@ async function onConfirmClick() {
                     .text(`Character card (and RAG) already saved — lorebook write failed: ${err.message}`)
                     .removeClass('chz-hidden');
                 $('#chz-confirm, #chz-cancel, #chz-move-back').prop('disabled', false);
+                showRecoveryGuide();
                 return;
             }
         } else {
@@ -3432,6 +3441,7 @@ async function onConfirmClick() {
                 .text(`Character card, RAG, and lorebook already saved — chat creation failed: ${err.message}`)
                 .removeClass('chz-hidden');
             $('#chz-confirm, #chz-cancel, #chz-move-back').prop('disabled', false);
+            showRecoveryGuide();
             return;
         }
     }
@@ -3503,7 +3513,10 @@ async function onConfirmClick() {
         return;
     }
 
-    closeModal();
+    // All steps succeeded — show the Close button so the user can review receipts
+    // before dismissing. The chat is already open in the background.
+    $('#chz-confirm').addClass('chz-hidden');
+    $('#chz-cancel').text('Close').prop('disabled', false);
 }
 
 // ─── Settings Panel ───────────────────────────────────────────────────────────

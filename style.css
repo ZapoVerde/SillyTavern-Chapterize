@@ -230,6 +230,12 @@
     padding: 4px 10px;
 }
 
+.chz-recovery-guide ol {
+    margin: 6px 0 0 1.2em;
+    padding: 0;
+    line-height: 1.7;
+}
+
 .chz-error-banner {
     font-size: 0.82rem;
     color: var(--chz-error-fg);

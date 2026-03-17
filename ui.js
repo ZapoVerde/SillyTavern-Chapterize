@@ -261,6 +261,16 @@ export function buildModalHTML(minTurns, maxTurns, defaultTurns) {
         <div id="chz-receipts-content" class="chz-receipts-content"></div>
       </div>
 
+      <div id="chz-recovery-guide" class="chz-warn chz-recovery-guide chz-hidden">
+        <strong>Chapterize Interrupted</strong>
+        <ol>
+          <li>Check which steps above failed.</li>
+          <li>Go to <strong>Settings &rarr; Chapterize</strong> to verify your connection or fix the issue.</li>
+          <li>When ready, use the <strong>Repair</strong> button to retry the transition.</li>
+          <li>You can safely close this modal &mdash; your bio and lore changes are preserved in the ledger.</li>
+        </ol>
+      </div>
+
       <div id="chz-error-5" class="chz-error-banner chz-hidden"></div>
     </div>
 
