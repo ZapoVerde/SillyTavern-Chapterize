@@ -48,9 +48,10 @@
  *       _suggestionsGenId, _situationGenId, _lorebookGenId,
  *       _lorebookName, _lorebookData, _draftLorebook, _lorebookLoading,
  *       _lorebookSuggestions, _lbActiveIngesterIndex, _lbDebounceTimer,
- *       _lorebookFreeformLastParsed, _currentStep, _lorebookRawText, 
- *       _lorebookRawError, _ragChunks, _ragRawDetached, _lastSummaryUsedForRag, 
+ *       _lorebookFreeformLastParsed, _currentStep, _lorebookRawText,
+ *       _lorebookRawError, _ragChunks, _ragRawDetached, _lastSummaryUsedForRag,
  *       _ragInFlightCount, _ragCallQueue, _ragGlobalGenId,
+ *       _ledgerManifest, _sessionStartId, _lorebookDelta,
  *       extension_settings.chapterize]
  *     external_io: [generateWithProfile, /api/characters/*, /api/worldinfo/*, 
  *       /api/chats/*, /api/files/*] # Includes physical deletion of Data Bank files.
@@ -293,6 +294,14 @@ let _isRepairMode         = false;  // true while the repair wizard is open
 let _sourceChatId         = '';     // filename (no .jsonl) of the chat being closed
 let _lastRagUrl           = '';     // server path of the most recently uploaded RAG file
 let _repairSourceMessages = [];     // source chat messages fetched in onRepairClick
+
+// ─── Narrative Ledger State ───────────────────────────────────────────────────
+// These three variables span the modal lifecycle — set at open, cleared at close.
+// initWizardSession() MUST NOT reset them; closeModal() MUST reset them to null.
+
+let _ledgerManifest  = null;  // in-memory manifest fetched/bootstrapped at modal open
+let _sessionStartId  = null;  // headNodeId captured at open; used for exit freshness lock
+let _lorebookDelta   = null;  // {createdUids, modifiedEntries} built during lorebook save
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
@@ -1579,6 +1588,10 @@ function closeModal() {
     _lastSummaryUsedForRag = null;
     _ragInFlightCount      = 0;
     _ragCallQueue          = [];
+    // Ledger state — always cleared on modal close
+    _ledgerManifest  = null;
+    _sessionStartId  = null;
+    _lorebookDelta   = null;
 }
 
 /**
@@ -2646,6 +2659,285 @@ async function onLbApplyAllUnresolved() {
     );
 }
 
+// ─── Narrative Ledger Engine ──────────────────────────────────────────────────
+
+/**
+ * Returns the sanitized Data Bank filename for a given character avatar key.
+ * @param {string} avatarKey  e.g. "seraphina.png" or "seraphina.png"
+ * @returns {string}          e.g. "chz_ledger_seraphina.png.json"
+ */
+function ledgerFileName(avatarKey) {
+    const safe = avatarKey.replace(/[^A-Za-z0-9_\-.]/g, '_');
+    return `chz_ledger_${safe}.json`;
+}
+
+/**
+ * Fetches the ledger for `avatarKey` from the Data Bank (using the path stored
+ * in settings), or bootstraps a fresh empty manifest if none exists yet.
+ * Sets `_ledgerManifest` and `_sessionStartId`. Must be the first call in
+ * both `onChapterizeClick` and `onRepairClick`.
+ * @param {string} avatarKey
+ */
+async function fetchOrBootstrapLedger(avatarKey) {
+    const storedPath = (getSettings().ledgerPaths ?? {})[avatarKey];
+    if (storedPath) {
+        try {
+            const res = await fetch(storedPath);
+            if (res.ok) {
+                const manifest   = await res.json();
+                _ledgerManifest  = manifest;
+                _sessionStartId  = manifest.headNodeId;
+                return;
+            }
+        } catch (_) { /* network error – fall through to bootstrap */ }
+    }
+    // No stored path or file gone — start fresh
+    _ledgerManifest = { storyId: crypto.randomUUID(), headNodeId: null, nodes: {} };
+    _sessionStartId = null;
+}
+
+/**
+ * Re-fetches the ledger from the server and compares its `headNodeId` against
+ * `_sessionStartId`. Returns true (and refreshes `_ledgerManifest`) only if
+ * nothing committed between modal-open and now. Called as the first async op
+ * in `onConfirmClick`. Never mutates `_sessionStartId`.
+ * @param {string} avatarKey
+ * @returns {Promise<boolean>}
+ */
+async function verifyFreshnessLock(avatarKey) {
+    const storedPath = (getSettings().ledgerPaths ?? {})[avatarKey];
+    if (!storedPath) {
+        // Ledger never written — fresh bootstrap session; headNodeId is null on both sides
+        return _sessionStartId === null;
+    }
+    try {
+        const res = await fetch(storedPath);
+        if (!res.ok) return false;
+        const freshManifest = await res.json();
+        if (freshManifest.headNodeId !== _sessionStartId) return false;
+        _ledgerManifest = freshManifest;   // absorb any unrelated node additions
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
+/**
+ * Populates wizard module state from a ledger node's snapshot. When
+ * `sourceNode` is null the caller is responsible for populating from
+ * SillyTavern.getContext() (standard first-run path).
+ * @param {object|null} sourceNode  A `LedgerNode` object, or null.
+ */
+function hydrateWizardSession(sourceNode) {
+    if (!sourceNode) return;
+    _originalDescription = sourceNode.snapshot.bio;
+    _baseScenario        = sourceNode.snapshot.baseScenario;
+    _priorSituation      = sourceNode.snapshot.priorSituation;
+    _lorebookName        = sourceNode.filePointers.lorebookName;
+    $('#chz-card-text').val(_originalDescription);
+    $('#chz-suggestions-raw').val(sourceNode.snapshot.aiRawBio ?? '');
+    $('#chz-situation-text').val(sourceNode.snapshot.stagedSituation ?? '');
+    $('#lbchz-title').text(`Lorebook: ${_lorebookName}`);
+}
+
+/**
+ * Diffs `_draftLorebook` against the original server copy `_lorebookData`
+ * and stores the result in `_lorebookDelta`. Called during the Lorebook Save
+ * step of `onConfirmClick` so the delta is available to `buildLedgerNode`.
+ * Short-circuits to an empty delta when no lorebook was loaded this session.
+ */
+function recordLorebookDelta() {
+    if (!_lorebookData || !_draftLorebook) {
+        _lorebookDelta = { createdUids: [], modifiedEntries: {} };
+        return;
+    }
+    const origEntries  = _lorebookData.entries  ?? {};
+    const draftEntries = _draftLorebook.entries ?? {};
+    const createdUids      = [];
+    const modifiedEntries  = {};
+    for (const [uid, draftEntry] of Object.entries(draftEntries)) {
+        const orig = origEntries[uid];
+        if (!orig) {
+            createdUids.push(uid);
+        } else if (
+            orig.content !== draftEntry.content ||
+            JSON.stringify(orig.key) !== JSON.stringify(draftEntry.key)
+        ) {
+            // Store the *original* values so Repair can revert to them
+            modifiedEntries[uid] = { content: orig.content, key: [...(orig.key ?? [])] };
+        }
+    }
+    _lorebookDelta = { createdUids, modifiedEntries };
+}
+
+/**
+ * Constructs a new `LedgerNode` from the current session state.
+ * Must be called after all `_finalizeSteps` have succeeded and after
+ * `recordLorebookDelta()` has been called.
+ * @param {string|null} parentNodeId    nodeId of the parent, or null for root.
+ * @param {number}      sequenceNum     Chapter ordinal (1-based).
+ * @param {object}      chatMetadata    ST chat metadata object captured at commit time.
+ * @returns {object}  A fully-populated LedgerNode.
+ */
+function buildLedgerNode(parentNodeId, sequenceNum, chatMetadata) {
+    const ctx  = SillyTavern.getContext();
+    const char = ctx.characters[ctx.characterId];
+    // Source identity: in repair mode inherit the original story's source fields
+    // so future repairs can always reach back to the originating chat.
+    const sourceFields = _isRepairMode
+        ? {
+            sourceChatId:   _ledgerManifest.nodes[_sessionStartId].filePointers.sourceChatId,
+            sourceAvatar:   _ledgerManifest.nodes[_sessionStartId].filePointers.sourceAvatar,
+            sourceCharName: _ledgerManifest.nodes[_sessionStartId].filePointers.sourceCharName,
+        }
+        : {
+            sourceChatId:   _sourceChatId,
+            sourceAvatar:   char.avatar,
+            sourceCharName: char.name,
+        };
+    return {
+        nodeId:      crypto.randomUUID(),
+        parentId:    parentNodeId,
+        sequenceNum,
+        status:      'active',
+        filePointers: {
+            chatFile:     _chapterName,
+            ragFile:      _lastRagUrl ?? '',
+            lorebookName: _lorebookName,
+            targetAvatar: _isRepairMode ? _cloneAvatarUrl
+                : _isChapterMode ? char.avatar : _cloneAvatarUrl,
+            ...sourceFields,
+        },
+        snapshot: {
+            bio:             $('#chz-card-text').val(),
+            baseScenario:    _baseScenario,
+            priorSituation:  $('#chz-situation-text').val(),
+            aiRawBio:        $('#chz-suggestions-raw').val(),
+            stagedSituation: $('#chz-situation-text').val(),
+            cloneName:       _cloneName,
+            chatMetadata,
+            lorebookDelta:   _lorebookDelta ?? { createdUids: [], modifiedEntries: {} },
+        },
+    };
+}
+
+/**
+ * Deletes the old ledger file from the Data Bank (to prevent ST's "(1).json"
+ * versioning), uploads the current `_ledgerManifest` as JSON, and stores the
+ * new path in `getSettings().ledgerPaths`.
+ * @param {string} avatarKey
+ */
+async function commitLedgerManifest(avatarKey) {
+    const storedPaths = getSettings().ledgerPaths ?? {};
+    const oldPath     = storedPaths[avatarKey];
+    if (oldPath) {
+        try {
+            await fetch('/api/files/delete', {
+                method:  'POST',
+                headers: getRequestHeaders(),
+                body:    JSON.stringify({ path: oldPath }),
+            });
+        } catch (_) { /* already gone */ }
+    }
+    const fileName = ledgerFileName(avatarKey);
+    const jsonStr  = JSON.stringify(_ledgerManifest);
+    const res = await fetch('/api/files/upload', {
+        method:  'POST',
+        headers: getRequestHeaders(),
+        body:    JSON.stringify({ name: fileName, data: utf8ToBase64(jsonStr) }),
+    });
+    if (!res.ok) throw new Error(`Ledger save failed (HTTP ${res.status})`);
+    const { path } = await res.json();
+    if (!getSettings().ledgerPaths) getSettings().ledgerPaths = {};
+    getSettings().ledgerPaths[avatarKey] = path;
+    saveSettingsDebounced();
+}
+
+/**
+ * Reverts lorebook entries created or modified during a chapter that is being
+ * repaired. Fetches the live lorebook, applies the reverse delta, and saves.
+ * Best-endeavors: caller must wrap in try/catch.
+ * @param {object} delta  `LedgerNode.snapshot.lorebookDelta` from the orphaned node.
+ */
+async function revertLorebookDelta(delta) {
+    if (!delta || !_lorebookName) return;
+    const lbData  = await lbGetLorebook(_lorebookName);
+    const entries = lbData.entries ?? {};
+    for (const uid of (delta.createdUids ?? [])) {
+        delete entries[uid];
+    }
+    for (const [uid, original] of Object.entries(delta.modifiedEntries ?? {})) {
+        if (entries[uid]) {
+            entries[uid].content = original.content;
+            entries[uid].key     = original.key;
+        }
+    }
+    lbData.entries = entries;
+    await lbSaveLorebook(_lorebookName, lbData);
+}
+
+/**
+ * Deletes the orphaned RAG file from the Data Bank and removes its attachment
+ * registration. Chat files are intentionally excluded — in repair mode the
+ * chat is overwritten in-place by saveNewChat(force:true), not versioned.
+ * Best-endeavors: caller must wrap in try/catch.
+ * @param {object} filePointers  `LedgerNode.filePointers` of the orphaned node.
+ */
+async function scrubOrphanedArtifacts(filePointers) {
+    if (!filePointers.ragFile) return;
+    try {
+        await fetch('/api/files/delete', {
+            method:  'POST',
+            headers: getRequestHeaders(),
+            body:    JSON.stringify({ path: filePointers.ragFile }),
+        });
+    } catch (_) { /* already gone */ }
+    const attachments = extension_settings.character_attachments;
+    if (attachments?.[filePointers.targetAvatar]) {
+        attachments[filePointers.targetAvatar] = attachments[filePointers.targetAvatar]
+            .filter(a => a.url !== filePointers.ragFile);
+        saveSettingsDebounced();
+    }
+}
+
+/**
+ * Fires when `verifyFreshnessLock` returns false. Shows an error message and
+ * a "Download Draft" button so the user can rescue their work. Keeps the
+ * Finalize button disabled — the stale session must not write to the server.
+ */
+function abortWithSyncError() {
+    const draftText = [
+        '=== Chapterize Draft (saved locally after sync conflict) ===',
+        '',
+        '--- Bio ---',
+        $('#chz-card-text').val(),
+        '',
+        '--- Situation ---',
+        $('#chz-situation-text').val(),
+    ].join('\n');
+
+    const blob = new Blob([draftText], { type: 'text/plain' });
+    const url  = URL.createObjectURL(blob);
+    const $dl  = $('<a>')
+        .attr('href', url)
+        .attr('download', 'chapterize_draft.txt')
+        .text('Download Draft');
+
+    $('#chz-error-5')
+        .empty()
+        .append(
+            document.createTextNode(
+                'Sync conflict: another session committed a chapter while this modal was open. ' +
+                'Your draft was not saved. ',
+            ),
+            $dl[0],
+        )
+        .removeClass('chz-hidden');
+
+    $('#chz-cancel').prop('disabled', false).text('Close');
+    // Finalize remains disabled — do not re-enable it
+}
+
 // ─── Event Handlers ───────────────────────────────────────────────────────────
 
 async function onChapterizeClick() {
@@ -2667,6 +2959,8 @@ async function onChapterizeClick() {
     }
 
     const char   = context.characters[context.characterId];
+    await fetchOrBootstrapLedger(char.avatar);
+
     _sourceChatId = char.chat ?? '';
     const parsed = parseChapter(char.name);
     _isChapterMode = parsed.isChapter;
@@ -2738,36 +3032,66 @@ async function onChapterizeClick() {
  * @section Repair Mode (Entry Point)
  * @architectural-role Workflow Controller
  * @description
- * Inflates the wizard from the lastSnapshot without firing new AI calls.
- * Fetches the original source chat so the turns slider is fully functional.
+ * Inflates the wizard from the Narrative Ledger without firing new AI calls.
+ * Time-travels to the parent node's snapshot so the user edits from the
+ * correct prior state. Fetches the parent chapter's chat as the transcript
+ * source so the turns slider is fully functional.
  * All session variables are set AFTER initWizardSession() so they are not
  * cleared by its reset logic.
  * @contract
  *   assertions:
  *     purity: impure
- *     state_ownership: [_isRepairMode, _transcript, _stagedProsePairs,
- *       _repairSourceMessages, _originalDescription, _priorSituation,
+ *     state_ownership: [_isRepairMode, _ledgerManifest, _sessionStartId,
+ *       _transcript, _stagedProsePairs, _repairSourceMessages,
+ *       _originalDescription, _priorSituation, _baseScenario,
  *       _chapterName, _cloneAvatarUrl, _cloneName, _lorebookName]
- *     external_io: [/api/chats/get, lbEnsureLorebook]
+ *     external_io: [fetchOrBootstrapLedger, /api/chats/get, lbEnsureLorebook]
  */
 async function onRepairClick() {
-    const snapshot = getSettings().lastSnapshot;
-    if (!snapshot) {
-        toastr.error('No previous Chapterize to repair. Run a Chapterize first.');
+    const context = SillyTavern.getContext();
+    if (context.characterId == null) {
+        toastr.warning('No character chat is open.');
+        return;
+    }
+    const char = context.characters[context.characterId];
+
+    // ── 1. Load ledger and validate repair is possible ─────────────────────────
+    await fetchOrBootstrapLedger(char.avatar);
+
+    if (!_ledgerManifest.headNodeId) {
+        toastr.error('No narrative history found for this character. Run a Chapterize first.');
+        _ledgerManifest = null;
+        _sessionStartId = null;
+        return;
+    }
+    const targetNode = _ledgerManifest.nodes[_ledgerManifest.headNodeId];
+    if (!targetNode?.parentId) {
+        toastr.error('Cannot repair the initial chapter — no prior state to restore from.');
+        _ledgerManifest = null;
+        _sessionStartId = null;
+        return;
+    }
+    const parentNode = _ledgerManifest.nodes[targetNode.parentId];
+    if (!parentNode) {
+        toastr.error('Ledger integrity error: parent node not found.');
+        _ledgerManifest = null;
+        _sessionStartId = null;
         return;
     }
 
-    // Fetch the source chat messages so the turns slider is fully operative
-    // and the transcript / prose-pairs can be rebuilt from live data.
+    // ── 2. Fetch the parent chapter's chat as the transcript source ────────────
+    // Uses parentNode.filePointers.chatFile + targetAvatar, not the original
+    // source chat — we re-do the most recent transition, not the first one.
+    const sourceChar = context.characters.find(c => c.avatar === parentNode.filePointers.targetAvatar);
     let sourceMessages;
     try {
         const res = await fetch('/api/chats/get', {
             method:  'POST',
             headers: getRequestHeaders(),
             body:    JSON.stringify({
-                ch_name:    snapshot.sourceCharName,
-                file_name:  snapshot.sourceChatId,
-                avatar_url: snapshot.sourceAvatar,
+                ch_name:    sourceChar?.name ?? parentNode.snapshot.cloneName,
+                file_name:  parentNode.filePointers.chatFile,
+                avatar_url: parentNode.filePointers.targetAvatar,
             }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -2776,40 +3100,42 @@ async function onRepairClick() {
             throw new Error('Response was empty or not a chat array.');
         }
     } catch (err) {
-        toastr.error('Cannot repair: source chat file is missing or unavailable.');
+        toastr.error('Cannot repair: parent chapter chat is missing or unavailable.');
         console.error('[Chapterize] Repair: source chat fetch failed:', err);
+        _ledgerManifest = null;
+        _sessionStartId = null;
         return;
     }
 
-    // ── 1. Flag + session wipe ─────────────────────────────────────────────────
+    // ── 3. Flag + session wipe ─────────────────────────────────────────────────
     _isRepairMode = true;
-    initWizardSession();   // clears all _ vars and resets UI to blank state
+    initWizardSession();   // clears all transient _ vars; does NOT clear _ledgerManifest/_sessionStartId
 
-    // ── 2. Inflate session state from snapshot + fetched source ────────────────
-    // Must happen AFTER initWizardSession() so these are not overwritten.
+    // ── 4. Set target identifiers — the chapter being replaced ────────────────
+    // Must happen AFTER initWizardSession() so these are not cleared.
+    _cloneAvatarUrl = targetNode.filePointers.targetAvatar;
+    _chapterName    = targetNode.filePointers.chatFile.replace(/\.jsonl$/i, '');
+    _cloneName      = targetNode.snapshot.cloneName;
+
+    // ── 5. Hydrate wizard from parent snapshot (time travel) ───────────────────
+    hydrateWizardSession(parentNode);
+
+    // ── 6. Inflate transcript state from fetched source ───────────────────────
     _repairSourceMessages = sourceMessages;
     _transcript           = buildTranscript(sourceMessages);
     _stagedProsePairs     = buildProsePairs(sourceMessages);
-    _originalDescription  = snapshot.originalDescription;
-    _priorSituation       = snapshot.priorSituation  ?? '';
-    _baseScenario         = snapshot.baseScenario    ?? '';
-    _chapterName          = snapshot.targetChatId;
-    _cloneAvatarUrl       = snapshot.targetAvatar;
-    _cloneName            = snapshot.cloneName;
-    _lorebookName         = snapshot.lorebookName;
 
-    // ── 3. Post-inflation UI corrections ──────────────────────────────────────
-    // initWizardSession() rendered titles/card-text with blanks; overwrite now.
+    // ── 7. Post-hydration UI corrections ──────────────────────────────────────
+    // initWizardSession() rendered titles with blank state; overwrite with repair labels.
     $('#chz-card-text').val(_originalDescription);
-    $('#lbchz-title').text(`Lorebook: ${_lorebookName}`);
     $('#chz-step1-title').text(`Repair: ${_cloneName}`).css('color', 'var(--warning, orange)');
     $('#chz-confirm').css('color', 'var(--warning, orange)');
 
-    // ── 4. Hydrate Steps 1 & 2 from snapshot (no AI calls) ────────────────────
-    populateSuggestions(snapshot.aiRawBio ?? '');
-    populateSituation(snapshot.stagedSituation ?? '');
+    // ── 8. Hydrate Steps 1 & 2 from parent snapshot (no AI calls) ─────────────
+    populateSuggestions(parentNode.snapshot.aiRawBio ?? '');
+    populateSituation(parentNode.snapshot.stagedSituation ?? '');
 
-    // ── 5. Lorebook: fetch server data for Step 3 (no AI call needed) ─────────
+    // ── 9. Lorebook: fetch server data for Step 3 (no AI call in repair mode) ──
     lbEnsureLorebook(_lorebookName)
         .then(data => {
             _lorebookData  = data;
@@ -2821,7 +3147,7 @@ async function onRepairClick() {
             setLbLoading(false);
         });
 
-    // ── 6. Launch modal ────────────────────────────────────────────────────────
+    // ── 10. Launch modal ───────────────────────────────────────────────────────
     showModal();
     updateWizard(1);
 }
@@ -2905,16 +3231,23 @@ async function onConfirmClick() {
     $('#chz-error-5').addClass('chz-hidden').text('');
     showReceiptsPanel();
 
-    // Capture context and chat data before any character-switching operations.
-    // In repair mode, chatMetadata and lastN come from the snapshot / fetched source.
+    // ── Freshness Lock (first async op) ────────────────────────────────────────
+    // Re-fetches the ledger and confirms the server HEAD has not moved since
+    // the modal was opened. Aborts with a sync-conflict message if stale.
     const context = SillyTavern.getContext();
     const char    = context.characters[context.characterId];
+    if (!await verifyFreshnessLock(char.avatar)) {
+        abortWithSyncError();
+        return;
+    }
+
+    // Capture chat data before any character-switching operations.
+    // In repair mode, chatMetadata comes from the ledger node captured at commit time.
     let chatMetadata;
     let lastN;
     if (_isRepairMode) {
-        const snapshot = getSettings().lastSnapshot;
-        chatMetadata   = snapshot.chatMetadata;
-        lastN          = buildLastN(_repairSourceMessages, turnsToCarry);
+        chatMetadata = _ledgerManifest.nodes[_sessionStartId].snapshot.chatMetadata;
+        lastN        = buildLastN(_repairSourceMessages, turnsToCarry);
     } else {
         chatMetadata = context.chatMetadata;
         lastN        = buildLastN(context.chat, turnsToCarry);
@@ -2925,15 +3258,14 @@ async function onConfirmClick() {
         try {
             if (_isRepairMode) {
                 // Repair mode: surgical overwrite of the existing chapter card.
-                // Skip name-regex and clone creation — target is known from snapshot.
-                const snapshot   = getSettings().lastSnapshot;
+                // _cloneAvatarUrl was set in onRepairClick to targetNode.filePointers.targetAvatar.
                 const allChars   = SillyTavern.getContext().characters;
-                const targetChar = allChars.find(c => c.avatar === snapshot.targetAvatar);
+                const targetChar = allChars.find(c => c.avatar === _cloneAvatarUrl);
                 if (!targetChar) throw new Error('Repair failed: target character card not found.');
                 await saveCharacter(targetChar, newDescription, newScenario, _cloneName);
                 await getCharacters();
                 const freshCtx = SillyTavern.getContext();
-                const idx = freshCtx.characters.findIndex(c => c.avatar === snapshot.targetAvatar);
+                const idx = freshCtx.characters.findIndex(c => c.avatar === _cloneAvatarUrl);
                 if (idx === -1) throw new Error('Character was saved but could not be located after reload.');
                 await selectCharacterById(idx);
             } else if (_isChapterMode) {
@@ -2985,31 +3317,31 @@ async function onConfirmClick() {
             const ragFileName = `${_cloneName}.txt`;
 
             if (_isRepairMode) {
-                const snapshot = getSettings().lastSnapshot;
-                if (snapshot.ragFileUrl) {
-                    // Physical deletion of the old file so the server reuses the
-                    // original filename on re-upload (no "(1).txt" versioning).
+                // Physical deletion of the old RAG file before re-uploading under
+                // the same name, preventing ST's "(1).txt" versioning behaviour.
+                const oldRagFile = _ledgerManifest.nodes[_sessionStartId]?.filePointers.ragFile;
+                if (oldRagFile) {
                     try {
                         await fetch('/api/files/delete', {
                             method:  'POST',
                             headers: getRequestHeaders(),
-                            body:    JSON.stringify({ path: snapshot.ragFileUrl }),
+                            body:    JSON.stringify({ path: oldRagFile }),
                         });
                     } catch (_) { /* file may already be gone — continue */ }
                     // Scrub the dead URL from the character's attachment list
                     const attachments = extension_settings.character_attachments;
-                    if (attachments?.[snapshot.targetAvatar]) {
-                        attachments[snapshot.targetAvatar] = attachments[snapshot.targetAvatar]
-                            .filter(a => a.url !== snapshot.ragFileUrl);
+                    if (attachments?.[_cloneAvatarUrl]) {
+                        attachments[_cloneAvatarUrl] = attachments[_cloneAvatarUrl]
+                            .filter(a => a.url !== oldRagFile);
                     }
                 }
             }
 
             const ragUrl      = await uploadRagFile(ragText, ragFileName);
             _lastRagUrl       = ragUrl;
-            // Avatar key: repair uses snapshot target; otherwise standard logic
+            // Avatar key: repair uses _cloneAvatarUrl (set to targetNode.filePointers.targetAvatar)
             const ragAvatarKey = _isRepairMode
-                ? getSettings().lastSnapshot.targetAvatar
+                ? _cloneAvatarUrl
                 : _isChapterMode ? char.avatar : _cloneAvatarUrl;
             const ragByteSize = new TextEncoder().encode(ragText).length;
             registerCharacterAttachment(ragAvatarKey, ragUrl, ragFileName, ragByteSize);
@@ -3033,6 +3365,9 @@ async function onConfirmClick() {
     if (!_finalizeSteps.lorebookSaved) {
         if (_draftLorebook && _lorebookName) {
             try {
+                // Capture the diff before the save so the delta reflects the
+                // original server state, not the just-written draft.
+                recordLorebookDelta();
                 await lbSaveLorebook(_lorebookName, _draftLorebook);
                 _finalizeSteps.lorebookSaved = true;
 
@@ -3074,9 +3409,9 @@ async function onConfirmClick() {
     // ── Step 4: Chat Save ──────────────────────────────────────────────────────
     if (!_finalizeSteps.chatSaved) {
         try {
-            // Repair mode uses snapshot.targetAvatar; normal mode uses existing logic
+            // Repair: _cloneAvatarUrl = targetNode.filePointers.targetAvatar (set in onRepairClick).
             const avatarKey = _isRepairMode
-                ? getSettings().lastSnapshot.targetAvatar
+                ? _cloneAvatarUrl
                 : _isChapterMode ? char.avatar : _cloneAvatarUrl;
             const freshCtx  = SillyTavern.getContext();
             const freshIdx  = freshCtx.characters.findIndex(c => c.avatar === avatarKey);
@@ -3101,35 +3436,58 @@ async function onConfirmClick() {
         }
     }
 
-    // ── Snapshot Save ──────────────────────────────────────────────────────────
-    // Saved after all writes succeed so future Repair Mode has fresh data.
-    // In repair mode, source identity fields are preserved from the existing snapshot.
+    // ── Ledger Commit ──────────────────────────────────────────────────────────
+    // Build the new node from current session state and write the updated manifest.
+    // In repair mode: tombstone the bad node before writing so a single POST
+    // persists both the new head and the orphaned status in one round-trip.
     {
-        const prevSnapshot = getSettings().lastSnapshot ?? {};
-        getSettings().lastSnapshot = {
-            sourceChatId:        _isRepairMode ? prevSnapshot.sourceChatId   : _sourceChatId,
-            sourceAvatar:        _isRepairMode ? prevSnapshot.sourceAvatar   : char.avatar,
-            sourceCharName:      _isRepairMode ? prevSnapshot.sourceCharName : char.name,
-            targetChatId:        _chapterName,
-            targetAvatar:        _isRepairMode
-                ? prevSnapshot.targetAvatar
-                : _isChapterMode ? char.avatar : _cloneAvatarUrl,
-            cloneName:           _cloneName,
-            lorebookName:        _lorebookName,
-            originalDescription: _originalDescription,
-            priorSituation:      _priorSituation,
-            baseScenario:        _baseScenario,
-            aiRawBio:            $('#chz-suggestions-raw').val(),
-            stagedSituation:     $('#chz-situation-text').val(),
-            ragFileUrl:          _lastRagUrl,
-            chatMetadata:        chatMetadata,
-        };
-        saveSettingsDebounced();
+        const parentNodeId = _isRepairMode
+            ? _ledgerManifest.nodes[_sessionStartId].parentId
+            : _sessionStartId;
+        const parentNode   = parentNodeId ? _ledgerManifest.nodes[parentNodeId] : null;
+        const sequenceNum  = (parentNode?.sequenceNum ?? 0) + 1;
+
+        const newNode = buildLedgerNode(parentNodeId, sequenceNum, chatMetadata);
+
+        if (_isRepairMode) {
+            _ledgerManifest.nodes[_sessionStartId].status = 'orphaned';
+        }
+        _ledgerManifest.nodes[newNode.nodeId] = newNode;
+        _ledgerManifest.headNodeId = newNode.nodeId;
+
+        try {
+            await commitLedgerManifest(char.avatar);
+            upsertReceiptItem('chz-receipt-ledger', receiptSuccess('Narrative Ledger updated'));
+        } catch (err) {
+            console.error('[Chapterize] Ledger commit failed:', err);
+            // Non-fatal — chapter content is fully saved; only future repair is affected
+            upsertReceiptItem('chz-receipt-ledger', receiptFailure(
+                `Ledger save failed: ${err.message} (chapter content saved)`,
+            ));
+        }
+
+        // ── Post-Commit Janitor (Repair mode only) ────────────────────────────
+        // Runs after the manifest is committed so the story is in a valid state
+        // even if cleanup fails. Reverts lorebook entries from the orphaned chapter
+        // and scrubs its RAG attachment. Best-endeavors — never blocks navigation.
+        if (_isRepairMode) {
+            const badNode = _ledgerManifest.nodes[_sessionStartId];
+            try {
+                await revertLorebookDelta(badNode.snapshot.lorebookDelta);
+            } catch (err) {
+                console.warn('[Chapterize] Janitor: lorebook revert failed (best endeavors):', err);
+            }
+            try {
+                await scrubOrphanedArtifacts(badNode.filePointers);
+            } catch (err) {
+                console.warn('[Chapterize] Janitor: artifact scrub failed (best endeavors):', err);
+            }
+        }
     }
 
     // ── Step 5: Navigate ───────────────────────────────────────────────────────
     try {
-        // Repair mode: _isChapterMode is false and _cloneAvatarUrl = snapshot.targetAvatar,
+        // Repair mode: _isChapterMode is false and _cloneAvatarUrl holds the target avatar,
         // so this branch fires for all repairs (harmless re-select for chapter-mode originals).
         // Normal clone mode: same condition, selects the newly created clone.
         if (!_isChapterMode && _cloneAvatarUrl) {
