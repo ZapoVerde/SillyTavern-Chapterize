@@ -430,6 +430,7 @@ async function ragFireChunk(chunkIndex) {
 
     chunk.status = 'in-flight';
     _ragInFlightCount++;
+    console.log(`[CHZ-DBG] ragFireChunk START chunk=${chunkIndex} localGenId=${localGenId} globalGenId=${globalGenId} inFlight=${_ragInFlightCount} queue=${_ragCallQueue.length}`);
     renderRagCard(chunkIndex);
 
     try {
@@ -437,7 +438,10 @@ async function ragFireChunk(chunkIndex) {
         const targetPairs  = _stagedProsePairs.slice(chunkIndex, chunkIndex + 2);
         const header       = await runRagClassifierCall(summaryAtCall, contextPairs, targetPairs);
 
-        if (_ragGlobalGenId !== globalGenId || chunk.genId !== localGenId) return;
+        const globalStale = _ragGlobalGenId !== globalGenId;
+        const localStale  = chunk.genId !== localGenId;
+        console.log(`[CHZ-DBG] ragFireChunk RESPONSE chunk=${chunkIndex} globalStale=${globalStale} localStale=${localStale} inFlight=${_ragInFlightCount}`);
+        if (globalStale || localStale) return;
 
         // If the summary changed since this call was fired, mark as stale
         if (_lastSummaryUsedForRag !== summaryAtCall) {
@@ -447,11 +451,15 @@ async function ragFireChunk(chunkIndex) {
             chunk.status = 'complete';
         }
     } catch (err) {
-        if (_ragGlobalGenId !== globalGenId || chunk.genId !== localGenId) return;
-        console.error('[Chapterize] RAG classifier failed for chunk', chunkIndex, err);
+        const globalStale = _ragGlobalGenId !== globalGenId;
+        const localStale  = chunk.genId !== localGenId;
+        console.error(`[CHZ-DBG] ragFireChunk ERROR chunk=${chunkIndex} globalStale=${globalStale} localStale=${localStale} inFlight=${_ragInFlightCount}`, err);
+        if (globalStale || localStale) return;
         chunk.status = 'pending';   // allow retry via regen button
     } finally {
-        if (_ragGlobalGenId === globalGenId) {
+        const globalStale = _ragGlobalGenId !== globalGenId;
+        console.log(`[CHZ-DBG] ragFireChunk FINALLY chunk=${chunkIndex} globalStale=${globalStale} inFlight(before)=${_ragInFlightCount} — will decrement: ${!globalStale}`);
+        if (!globalStale) {
             _ragInFlightCount = Math.max(0, _ragInFlightCount - 1);
             ragDrainQueue();
         }
@@ -467,9 +475,13 @@ async function ragFireChunk(chunkIndex) {
  */
 function ragDrainQueue() {
     const max = getSettings().maxConcurrentCalls ?? DEFAULT_CONCURRENCY;
+    console.log(`[CHZ-DBG] ragDrainQueue inFlight=${_ragInFlightCount} max=${max} queue=${JSON.stringify(_ragCallQueue)}`);
     while (_ragInFlightCount < max && _ragCallQueue.length > 0) {
         const idx = _ragCallQueue.shift();
         ragFireChunk(idx);
+    }
+    if (_ragInFlightCount >= max && _ragCallQueue.length > 0) {
+        console.warn(`[CHZ-DBG] ragDrainQueue BLOCKED — inFlight=${_ragInFlightCount} >= max=${max}, ${_ragCallQueue.length} chunks still queued`);
     }
 }
 
@@ -481,11 +493,16 @@ function ragDrainQueue() {
  */
 function ragRegenCard(chunkIndex) {
     const chunk = _ragChunks[chunkIndex];
-    if (!chunk || !_lastSummaryUsedForRag) return;
+    console.log(`[CHZ-DBG] ragRegenCard chunk=${chunkIndex} chunkExists=${!!chunk} hasSummary=${!!_lastSummaryUsedForRag} prevStatus=${chunk?.status} inFlight=${_ragInFlightCount} queue=${JSON.stringify(_ragCallQueue)}`);
+    if (!chunk || !_lastSummaryUsedForRag) {
+        console.warn(`[CHZ-DBG] ragRegenCard ABORTED — chunk=${!!chunk} hasSummary=${!!_lastSummaryUsedForRag}`);
+        return;
+    }
 
     if (chunk.status === 'in-flight') {
         // Reclaim the in-flight slot — the old call result will be discarded via genId mismatch
         _ragInFlightCount = Math.max(0, _ragInFlightCount - 1);
+        console.log(`[CHZ-DBG] ragRegenCard reclaimed in-flight slot, inFlight now=${_ragInFlightCount}`);
     }
     // Remove from pending queue if it was queued but not fired
     _ragCallQueue = _ragCallQueue.filter(i => i !== chunkIndex);
@@ -1743,6 +1760,7 @@ function onEnterRagWorkshop() {
         const s = _ragChunks[i].status;
         if (s === 'pending' || s === 'stale') _ragCallQueue.push(i);
     }
+    console.log(`[CHZ-DBG] onEnterRagWorkshop enqueued=${JSON.stringify(_ragCallQueue)} totalChunks=${_ragChunks.length} inFlight=${_ragInFlightCount} globalGenId=${_ragGlobalGenId} summaryChanged=${summaryChanged}`);
     ragDrainQueue();
 }
 
