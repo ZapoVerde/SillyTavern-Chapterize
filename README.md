@@ -1,93 +1,127 @@
+
 ***
 
 # Chapterize for SillyTavern
 
-**Chapterize** is a narrative management tool for SillyTavern designed to solve "context bloat" in long-running roleplays. It closes a chapter by evolving your character card with the events of the current chat, extracting lore, and transitioning into a fresh chat file with a concise situational summary — all through a staged draft workflow that commits nothing until you hit Finalize.
+**Chapterize** is a narrative management tool designed to keep your long-running roleplays fast, affordable, and coherent. As stories grow, "context bloat" causes AI responses to become slow, expensive, and prone to forgetting recent details. 
 
-## How it Works
+Chapterize solves this by periodically closing the current chat and capturing its events into your character’s permanent state. This keeps your active chat context lightweight, fresh, and cheap, while preserving the granularity of your history by moving old turns into RAG (Retrieval-Augmented Generation) vectors.
 
-When you trigger Chapterize, the extension determines whether the active character is a **base character** (first chapterize) or an **existing chapter card** already carrying a `(ChX)` suffix (subsequent chapterizes). It then orchestrates a 5-step wizard:
+Everything is done through a safe, step-by-step drafting process—nothing is actually saved to your SillyTavern files until you review and confirm the changes.
 
-### Step 1 — Character Workshop
-Two LLM calls fire simultaneously as soon as the modal opens: the **Card Audit** and the **Situation Summary** (see Step 2). A third call fetches and analyses the lorebook in parallel (see Step 3).
+### Key Features
+*   **Character Evolution:** Automatically audits your character’s description after a chapter ends, suggesting updates for new injuries, status shifts, or personality changes.
+*   **Narrative Continuity:** Generates a concise "Previously On..." summary stored in the character's scenario, ensuring the AI never loses the thread of the plot.
+*   **Dynamic Lore Extraction:** Identifies new NPCs, locations, or items introduced during play and stages updates to your Lorebook (World Info).
+*   **Narrative Memory (RAG):** Instead of simply deleting old messages, Chapterize slices your transcript into structured files uploaded to the SillyTavern Data Bank. The AI can recall these specific past events only when they become relevant.
+*   **Clean Transitions:** Opens a fresh chat file seeded with just enough recent messages to maintain tone and conversation flow.
+*   **The Repair Engine:** A "surgical" repair mode that lets you undo a transition, tweak the summary or bio, and overwrite the chapter without creating messy duplicate cards or orphaned files.
 
-The Character Workshop is a three-tab editor for staging changes to the character description:
-- **Draft Bio** — the full description in an editable textarea. Edit directly, or use the Ingester to apply AI suggestions section by section. A "Revert to Original" button resets it to the unmodified card text.
-- **AI Raw** — the unprocessed card-audit output. A regenerate button re-runs the call against the current Draft Bio. A warning banner appears if any suggestions remain unapplied or unrejected.
-- **Ingester** — a section-aware diff panel. A dropdown lists every parsed suggestion. The diff pane shows a word-level comparison between the matching bio section and the current editor content. Controls allow you to jump to unresolved items, revert to the AI's generation or the current draft bio, and selectively apply or reject edits.
-
-### Step 2 — Situation Workshop
-An editable textarea receives the **Situation Summary**: a 200–500 word present-tense narrative brief covering where the story stands, unresolved threads, and character realizations. It has its own regenerate button. The **Turns** slider (1–10, default 4) controls how many recent chat pairs are seeded into the new chapter for tone continuity.
-
-### Step 3 — Lorebook Workshop
-Exposes the results of the background lorebook audit across two tabs:
-- **Freeform** — the raw AI output, fully editable before parsing.
-- **Ingester** — parses the text into structured `UPDATE` and `NEW` blocks. Each suggestion is enriched with a UID anchor to ensure manual edits or regenerations don't lose track of your applied/rejected states. You can apply items one by one or click **Apply All Unresolved**.
-
-### Step 4 — Narrative Memory (RAG) Workshop
-*(Optional: Must be enabled in Settings)*
-Transforms the completed chapter's transcript into a structured reference document for SillyTavern's Data Bank (Vector Storage). 
-- **AI Mode:** Automatically slices the transcript into sliding-window chunks and queues concurrent LLM calls to generate brief, semantic headers describing the specific events of each chunk (e.g., *"The protagonist discovers the hidden letter"*). 
-- **Simple Mode:** Bypasses AI generation entirely, labeling chunks with basic numerical markers (e.g., *"Chunk 1 (Turns 1-2)"*). Fast and completely local.
-- **Detached Editing:** Switch to the "Raw" tab to manually edit the compiled document. Doing so "detaches" the workshop, preventing further AI generation from overwriting your custom formatting. Upon Finalize, this document is automatically uploaded and linked to the new chapter card.
-
-### Step 5 — Review & Commit
-A pre-flight summary shows the target character name, operation mode (Clone, Edit-in-Place, or Repair), the number of messages being carried over, and pending lorebook updates.
-
-Clicking **Finalize** executes the following atomic sequence:
-1. **Card Save** — Creates a clone card (`CharName (Ch1)`) or edits an existing chapter card in-place and bumps its name (`(ChX)` → `(ChX+1)`).
-2. **RAG Upload** — Pushes the completed Narrative Memory file to the Data Bank and registers the attachment.
-3. **Lorebook Save** — Bulk-writes staged lorebook changes to the server.
-4. **Chat Save** — Creates the new chat file (`ch1`, `ch2`, …) seeded with the last N turns.
-5. **Navigate** — Switches you to the new chat automatically.
-
-If a step fails, the Receipts Panel shows the error. You can click Finalize again to retry *only* the failed steps.
-
-### 🛠️ Repair Mode
-Mistakes happen. If a transition went wrong, use the **Repair** button in the Chapterize settings. This re-inflates the wizard using the exact chat file and state from your last transition, allowing you to tweak the summary, adjust the carried turns, or fix the bio, and perform a *surgical overwrite* of the existing chapter without generating messy duplicates.
+### Why use it?
+1.  **Lower Costs:** By resetting the active chat, you stop paying for thousands of redundant "history" tokens every time you hit send.
+2.  **Better Performance:** A shorter context window means faster responses and an AI that stays focused on the current scene.
+3.  **Perfect Memory:** By moving old turns into RAG vectors, you preserve the specific details of your journey without clogging the AI's "working memory."
 
 ---
 
-## Model Recommendations & Inference Notes 🧠
+## How to Use It
 
-The quality of chapter transitions depends heavily on the model used. Because the extension requires the AI to analyze long transcripts, parse facts, and output strict structural formatting (like exact Lorebook block matching), **large, high-reasoning models are strongly recommended.** Smaller or heavily roleplay-tuned models may struggle with formatting constraints, hallucinate details, or output conversational filler.
+Click the Chapterize button in your Extensions menu (or type `/chapterize` in chat) to open the 5-step wizard:
 
-**⚠️ Note on Inference (Text Completion vs. Chat Completion):**
-Chapterize uses **Raw Text Completion (Direct Inference)**. It intentionally bypasses SillyTavern's global System Prompts, instruction templates, and Character-specific jailbreaks.
-*   **Context Isolation:** The AI calls made by this extension do not include your chat history outside of what is explicitly interpolated into the prompt templates. 
-*   **Why?** This isolation is by design. It forces the AI to treat the transcript as a *technical data source* to be analyzed rather than a prompt to continue the roleplay, ensuring clean, factual outputs uncolored by your current roleplay style.
+### Step 1 — Character Workshop
+As soon as you open Chapterize, the AI analyzes your chat and suggests updates to the character's description. 
+* Use the **Ingester** tab to review these suggestions one by one. 
+* Compare the AI's suggestion against your current bio and click **Apply** or **Reject**. 
+* You can also type directly into the **Draft Bio** box to make manual edits.
+
+### Step 2 — Situation Workshop
+The AI generates a 200–500 word summary of where the story currently stands and what unresolved threads are hanging in the air. You can edit this summary freely. 
+Below the summary, use the **Turns** slider to choose how many recent chat pairs (user + AI message) to carry over into the new chapter to maintain the current conversation flow.
+
+### Step 3 — Lorebook Workshop
+The AI scans your current Lorebook (World Info) alongside the chat to find stale entries that need updating or new concepts that need their own entry.
+* Review the suggested `UPDATE` and `NEW` entries.
+* Edit the names, keywords, or content as needed, then apply them individually or click **Apply All Unresolved**.
+
+### Step 4 — Narrative Memory Workshop (Optional)
+*(Must be enabled in the Chapterize settings)*
+This step turns your finished chapter into a long-term memory document for SillyTavern's Vector Storage (Data Bank).
+* **AI Mode:** Automatically chops the chapter into chunks and generates a brief, descriptive header for each event.
+* **Simple/Raw Mode:** If you prefer, you can skip the AI generation and manually type out the memory document yourself in the "Raw" tab. 
+
+### Step 5 — Review & Commit
+Review a final checklist of the changes you are about to make. 
+Clicking **Finalize** will instantly:
+1. Update your character card (or create a `(Ch2)` clone).
+2. Save your Narrative Memory to the Data Bank.
+3. Save your applied Lorebook updates.
+4. Create your fresh chat file and automatically switch you over to it.
+
+---
+
+## 🛠️ Repair Mode
+Did you click Finalize and realize you made a typo, or didn't carry over enough turns? 
+Open the Chapterize settings panel and click the **Repair** button. This will reopen the wizard exactly as it was during your last transition. You can fix your mistakes, hit Finalize again, and it will safely overwrite the broken chapter. It even acts as a "Janitor," hunting down and cleaning up the orphaned Lorebook and RAG data from your mistake.
+
+---
+
+## ⚙️ Configuration & Settings
+
+In the SillyTavern Extensions settings panel, you can configure how Chapterize behaves:
+
+*   **Default Turns:** How many turns to carry over into new chapters by default (1–10).
+*   **Enable RAG / RAG AI Mode:** Toggles Step 4 (Narrative Memory builder) and its AI-driven semantic header generation. If you don't use Vector Storage, turn this off.
+*   **Connection Profiles:** You can pin Chapterize's core AI calls (and its RAG classification calls) to specific Connection Manager profiles. *Pro Tip: This allows you to use a heavy, smart model for Chapterize background tasks, while using a faster/cheaper model for your main chat.*
+*   **Concurrency & Lookback:** Tune how many parallel RAG calls can fire at once, and how many past turns the AI is allowed to "look back" on for context.
+*   **Prompt Templates:** Fully rewrite the instructions for the Card Audit, Situation, Lorebook, and RAG calls. 
+
+---
+
+## 🧠 Basic RAG Setup & Model Recommendations
+
+### Setting up Vector Storage (For Step 4)
+Chapterize automates the creation of RAG documents, but **SillyTavern needs to be configured to read them.** If you do not have Vector Storage set up, Step 4 will upload text files to your Data Bank, but the AI won't be able to "remember" them.
+1. In SillyTavern, go to the **Data Bank** (the book icon).
+2. Go to the **Vectorization** settings.
+3. Select an **Embedding Provider** (e.g., OpenAI, Cohere, Transformers, Extras) and ensure it is connected.
+4. Enable "Vector Storage" in your chat settings.
+*If you don't want to use this feature, simply disable RAG in the Chapterize settings.*
+
+### Choosing the Right AI Model
+The quality of your chapter transitions depends heavily on the model you use. Because Chapterize needs to analyze long chats, extract facts, and output strict formats, **large, high-reasoning models are strongly recommended.** Smaller or heavily roleplay-tuned models may struggle to follow formatting rules or might start writing dialogue instead of summaries.
+
+*(Note: Chapterize intentionally ignores your SillyTavern system prompts and jailbreaks. This ensures the AI treats the chat as pure data to be summarized, rather than a prompt to continue roleplaying.)*
+
+---
+
+## 💡 Best Practices & Limitations
+
+### Limitations
+*   **Single Character Only:** Chapterize does not currently support Group Chats.
+
+### Shortcuts
+*   **Slash Command:** You can trigger the workflow at any time by typing `/chapterize` in the chat box. This is useful for mapping the extension to Quick Reply buttons or automated macros.
+
+### Best Practices
+*   **When to Chapterize:** The best time to Chapterize is when a major narrative scene concludes (e.g., the characters leave a tavern, finish a battle, or go to sleep), or when your context window is maxing out and responses are getting sluggish/expensive.
+*   **The Scenario Divider:** After finalizing, you will see `*** Chapterize Divider — Do Not Edit ***` in your character's Scenario box. **Do not delete this.** The extension uses it to distinguish between your permanent world-state and the "rolling" narrative summary.
+*   **The Ledger File:** Chapterize stores a file called `chz_ledger_[character].json` in your Data Bank. This tracks your chapter history and acts as a safety lock to prevent data corruption. **Do not delete this file**, or Repair Mode will permanently lose the ability to fix past transitions for that character.
+
+---
 
 ## Installation
 
-### Via SillyTavern UI (Recommended)
+**Via SillyTavern UI (Recommended)**
 1. Open the **Extensions** menu (the "stacked boxes" icon in the top bar).
 2. Click **Install extension**.
-3. Paste the URL of this repository into the input box and click **Install**.
-4. The **Chapterize** entry (forward-step icon) will appear in your Extensions menu.
+3. Paste this repository URL into the input box and click **Install**.
+4. The **Chapterize** entry will appear in your Extensions menu.
 
-### Manual Installation
+**Manual Installation**
 1. Navigate to your SillyTavern installation folder.
 2. Go to `public/extensions`.
 3. Clone this repository: `git clone https://github.com/ZapoVerde/SillyTavern-Chapterize.git`
 4. Refresh SillyTavern in your browser.
-
-## Configuration
-
-In the SillyTavern Extensions settings panel you can configure:
-
-- **Default Turns:** How many turns to carry over into new chapters (1–10).
-- **Store Changelog:** Keeps a timestamped history of transitions.
-- **Enable RAG / RAG AI Mode:** Toggles the Narrative Memory builder and its AI-driven semantic header generation.
-- **Connection Profiles:** Pin Chapterize's core AI calls (and its RAG classification calls) to specific Connection Manager profiles. *Pro Tip: This allows you to use a heavy reasoning model for Chapterize background tasks while using a faster/cheaper model for your main chat.*
-- **Concurrency & Lookback:** Tune how many parallel RAG calls can fire at once, and how many past turns the AI is allowed to "look back" on for context.
-- **Prompt Templates:** Fully rewrite the instructions for the Card Audit, Situation, Lorebook, and RAG calls. Each prompt has a *before content* and *after content* section to ensure constraints are placed at the very end of the prompt for maximum adherence.
-
-## Technical Notes
-
-- **Staged Memory:** Nothing is committed until you hit Finalize. All edits to the bio, RAG document, and lorebook are staged entirely in your browser's memory.
-- **Divider Persistence:** The situation summary is appended to the bottom of the character's **Scenario** box, separated by `\n\n*** Chapterize Divider — Do Not Edit ***\n\n`. This keeps the character's core bio clean while ensuring the AI has a high-recency, rolling summary of the prior chapter's events. Any original world-state text in the Scenario box is preserved above the divider.
-- **Non-Destructive:** Outside of Repair Mode, the original chat file is **never modified**. The new chapter chat is a cleanly generated `.jsonl` file.
-- **Diff Engine:** The extension utilizes section-aware parsing (`parseDescriptionSections`) and word-level Longest Common Subsequence logic (`wordDiff`) to accurately track changes and map AI suggestions even when duplicate headers exist in a character's bio.
 
 ## License
 AGPL-3.0 — see LICENSE
