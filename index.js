@@ -217,6 +217,8 @@ const SETTINGS_DEFAULTS = Object.freeze({
     autoTriggerEvery:       10,
     autoTriggerSnoozeTurns: 5,
     autoTriggerModal:       false,
+    ragSummaryOnly:         false,  // Exclude dialogue body from committed RAG file
+    useQvink:               false,  // Use qvink_memory metadata as chunk headers (no AI calls)
 });
 
 // ─── Session State ────────────────────────────────────────────────────────────
@@ -375,15 +377,33 @@ function buildProsePairs(messages) {
 }
 
 /**
+ * Extracts qvink_memory text from the AI message in a prose pair.
+ * Returns null if the metadata is absent (e.g. pre-Qvink messages or models
+ * that don't emit it), which leaves the chunk status as 'pending' so the user
+ * can regen with the standard classifier.
+ * @param {Object} pair  A prose pair from _stagedProsePairs.
+ * @returns {string|null}
+ */
+function getQvinkFromPair(pair) {
+    return pair.ai?.extra?.qvink_memory?.memory || null;
+}
+
+/**
  * Builds the final RAG document from the workshop chunk state.
- * Each chunk uses its current semantic header (AI-generated or user-edited).
- * Chunks are separated by `---` so ST's recursive splitter treats each as a
+ * Each chunk uses its current semantic header (AI-generated, Qvink-sourced, or user-edited).
+ * When ragSummaryOnly is ON, writes only the header list (no dialogue body).
+ * When OFF, chunks are separated by `***` so ST's recursive splitter treats each as a
  * discrete vector entry.
  * @param {Array} ragChunks  _ragChunks array from session state.
  * @returns {string}
  */
 function buildRagDocument(ragChunks) {
     if (!ragChunks.length) return '';
+    if (getSettings().ragSummaryOnly) {
+        return ragChunks
+            .map(c => `[Event ${c.chunkIndex + 1}]: ${c.header}`)
+            .join('\n\n');
+    }
     return ragChunks
         .map(c => `### ${c.header}\n\n${c.content}`)
         .join('\n\n***\n\n');
@@ -391,31 +411,43 @@ function buildRagDocument(ragChunks) {
 
 /**
  * Builds the _ragChunks state array from the staged prose pairs.
- * Uses the same sliding window of 2 pairs (stride 1) as the original
- * buildRagDocument. The content body is the formatted dialogue; header starts
- * as the turn-range label (fallback) and is later replaced by AI classification.
- * @param {Array} pairs  _stagedProsePairs array.
+ * Window size is conditional on useQvink:
+ *   - Qvink mode: 1:1 mapping (one chunk per pair) — headers are pre-populated
+ *     from qvink_memory metadata and status is set to 'complete'. Pairs that
+ *     lack metadata start as 'pending' and can be regenerated individually.
+ *   - Standard mode: 2-pair sliding window (stride 1) for richer classifier context.
+ * @param {Array} pairs  _stagedProsePairs array (archive slice only).
  * @returns {Array}
  */
 function buildRagChunks(pairs) {
-    const chunks = [];
+    const chunks   = [];
+    const useQvink = getSettings().useQvink;
+
     for (let i = 0; i < pairs.length; i++) {
-        const window = pairs.slice(i, i + 2);
-        const turnA = i + 1;
-        const turnB = Math.min(i + 2, pairs.length);
-        const turnLabel = turnA === turnB
-            ? `Chunk ${i + 1} (Turn ${turnA})`
-            : `Chunk ${i + 1} (Turns ${turnA}–${turnB})`;
+        // Qvink mode: 1:1 mapping for per-turn metadata precision.
+        // Standard mode: 2-pair sliding window for richer classifier context.
+        const window = useQvink ? pairs.slice(i, i + 1) : pairs.slice(i, i + 2);
+        const turnA  = i + 1;
+        const turnB  = Math.min(i + 2, pairs.length);
+        const turnLabel = useQvink
+            ? `Turn ${turnA}`
+            : (turnA === turnB
+                ? `Chunk ${i + 1} (Turn ${turnA})`
+                : `Chunk ${i + 1} (Turns ${turnA}–${turnB})`);
+
         const content = window
             .map(p => `[${p.user.name.toUpperCase()}]\n${p.user.mes}\n\n[${p.ai.name.toUpperCase()}]\n${p.ai.mes}`)
             .join('\n\n');
+
+        const qvinkText = useQvink ? getQvinkFromPair(pairs[i]) : null;
+
         chunks.push({
             chunkIndex: i,
             pairStart:  i,
             turnLabel,
             content,
-            header:  turnLabel,   // replaced by AI on successful classification
-            status:  'pending',
+            header:  qvinkText || turnLabel,
+            status:  (useQvink && qvinkText) ? 'complete' : 'pending',
             genId:   0,
         });
     }
@@ -424,10 +456,17 @@ function buildRagChunks(pairs) {
 
 /**
  * Compiles the Combined Raw text from current _ragChunks state.
+ * Mirrors buildRagDocument format so the raw tab matches committed output.
+ * When ragSummaryOnly is ON, returns the header list only (no dialogue body).
  * Pure data function — reads _ragChunks only, no DOM access.
  * @returns {string}
  */
 function compileRagFromChunks() {
+    if (getSettings().ragSummaryOnly) {
+        return _ragChunks
+            .map(c => `[Event ${c.chunkIndex + 1}]: ${c.header}`)
+            .join('\n\n');
+    }
     return _ragChunks
         .map(c => `### ${c.header}\n\n${c.content}`)
         .join('\n\n***\n\n');
@@ -454,8 +493,10 @@ async function ragFireChunk(chunkIndex) {
 
     try {
         const contextPairs = _stagedProsePairs.slice(Math.max(0, chunkIndex - lookback), chunkIndex);
-        // Clamp to _splitPairIdx so the classifier never reads carry-window pairs
-        const targetPairs  = _stagedProsePairs.slice(chunkIndex, Math.min(chunkIndex + 2, _splitPairIdx));
+        // Clamp to _splitPairIdx so the classifier never reads carry-window pairs.
+        // Window size matches buildRagChunks: 1 pair in Qvink mode, 2 otherwise.
+        const windowSize  = getSettings().useQvink ? 1 : 2;
+        const targetPairs = _stagedProsePairs.slice(chunkIndex, Math.min(chunkIndex + windowSize, _splitPairIdx));
         const header       = await runRagClassifierCall(summaryAtCall, contextPairs, targetPairs);
 
         const globalStale = _ragGlobalGenId !== globalGenId;
@@ -1770,6 +1811,20 @@ function updateWizard(n) {
 }
 
 /**
+ * Returns a short string describing the current output mode for the workshop
+ * header note. Priority: useQvink > ragAiMode.
+ * @returns {string}
+ */
+function getRagModeLabel() {
+    const { ragAiMode, ragSummaryOnly, useQvink } = getSettings();
+    if (useQvink)   return ragSummaryOnly ? 'Output: Qvink summary only'
+                                          : 'Output: Qvink summary + full text';
+    if (!ragAiMode) return 'Output: Full text only (no AI mode)';
+    return ragSummaryOnly ? 'Output: Summary only'
+                          : 'Output: Summary + full text';
+}
+
+/**
  * Called whenever the user enters Step 4 (Narrative Memory Workshop).
  * Builds chunk state on first entry, detects stale summaries on re-entry,
  * fires pending/stale classification calls.
@@ -1777,11 +1832,13 @@ function updateWizard(n) {
 function onEnterRagWorkshop() {
     if (!getSettings().enableRag) {
         $('#chz-rag-disabled').removeClass('chz-hidden');
+        $('#chz-rag-mode-note').addClass('chz-hidden');
         $('#chz-rag-no-summary, #chz-rag-tab-bar, #chz-rag-tab-sectioned, #chz-rag-tab-raw').addClass('chz-hidden');
         $('#chz-rag-detached-warn, #chz-rag-detached-revert').addClass('chz-hidden');
         return;
     }
     $('#chz-rag-disabled').addClass('chz-hidden');
+    $('#chz-rag-mode-note').text(getRagModeLabel()).removeClass('chz-hidden');
 
     const summaryText = $('#chz-situation-text').val().trim();
     const hasError    = !$('#chz-error-2').hasClass('chz-hidden');
@@ -3774,6 +3831,16 @@ function bindSettingsHandlers() {
         getSettings().ragAiMode = $('#chz-set-rag-ai-mode').is(':checked');
         saveSettingsDebounced();
         updateRagSettingsState();
+    });
+
+    $('#chz-set-rag-summary-only').on('change', () => {
+        getSettings().ragSummaryOnly = $('#chz-set-rag-summary-only').is(':checked');
+        saveSettingsDebounced();
+    });
+
+    $('#chz-set-use-qvink').on('change', () => {
+        getSettings().useQvink = $('#chz-set-use-qvink').is(':checked');
+        saveSettingsDebounced();
     });
 
     // Reflect initial state on panel load

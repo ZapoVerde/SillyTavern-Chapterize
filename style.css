@@ -588,6 +588,12 @@
 
 /* ─── RAG Workshop (Step 4) ──────────────────────────────────────────────── */
 
+.chz-mode-note {
+    font-size: 0.82rem;
+    color: var(--chz-text-muted, #888);
+    margin-bottom: 0.6em;
+}
+
 .chz-rag-cards {
     display: flex;
     flex-direction: column;

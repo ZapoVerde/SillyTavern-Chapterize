@@ -201,6 +201,9 @@ export function buildModalHTML(minTurns, maxTurns, defaultTurns) {
     <div id="chz-step-4" class="chz-step chz-hidden">
       <h3 class="chz-title" data-i18n="chapterize.rag_workshop_title">Narrative Memory Workshop</h3>
 
+      <!-- Current output mode indicator -->
+      <div id="chz-rag-mode-note" class="chz-mode-note chz-hidden"></div>
+
       <!-- No-summary warning (shown when summary is empty or errored) -->
       <div id="chz-rag-no-summary" class="chz-warn chz-hidden"
            data-i18n="chapterize.rag_no_summary">A Situation Summary is required to generate semantic headers. Return to Step 2 and complete the summary.</div>
@@ -484,6 +487,23 @@ export function buildSettingsHTML(minTurns, maxTurns, minLookback, maxLookback, 
           </div>
 
         </div><!-- /chz-rag-ai-controls -->
+
+        <div class="chz-settings-row">
+          <label>
+            <input id="chz-set-use-qvink" type="checkbox" ${s.useQvink ? 'checked' : ''}>
+            <span>Use Qvink Metadata (no AI calls)</span>
+          </label>
+          <small style="opacity:0.7">Populates chunk headers from <code>qvink_memory</code> attached to each AI message. Skips the classifier entirely — chunks with missing metadata fall back to pending and can be regenerated individually.</small>
+        </div>
+
+        <div class="chz-settings-row">
+          <label>
+            <input id="chz-set-rag-summary-only" type="checkbox" ${s.ragSummaryOnly ? 'checked' : ''}>
+            <span>Summary Only (exclude dialogue from RAG file)</span>
+          </label>
+          <small style="opacity:0.7">Writes only the chunk headers to the Data Bank file, not the dialogue body. Reduces token cost when the AI only needs event labels, not full scene text.</small>
+        </div>
+
       </div><!-- /chz-rag-settings-body -->
 
     </div>
