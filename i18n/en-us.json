@@ -76,5 +76,11 @@
     "chapterize.settings_rag_profile_label":   "RAG Classifier Connection Profile",
     "chapterize.settings_rag_profile_hint":    "Connection profile used specifically for chunk header classification calls. Falls back to the General profile, then the global connection.",
     "chapterize.settings_rag_classifier_prompt": "Classifier prompt",
-    "chapterize.reset":                        "Reset"
+    "chapterize.reset":                        "Reset",
+
+    "chapterize.autotrigger_msg":              "{{count}} turns ready to chapterize",
+    "chapterize.autotrigger_open":             "Open Wizard",
+    "chapterize.autotrigger_dismiss_title":    "Dismiss",
+    "chapterize.settings_autotrigger_label":   "Auto-trigger every N turns (0 = off)",
+    "chapterize.settings_snooze_label":        "Re-remind after N turns (0 = once per threshold)"
 }

@@ -1,6 +1,3 @@
-You are absolutely right. In the process of adding the advanced cleanup steps, the "bread and butter" commands for actually saving your work got buried or summarized away.
-
-Here is the **Revised Master Cheatsheet**. I have restored the "Inner Loop" (Status, Add, Commit) and integrated it into the flow so you have everything in one place.
 
 ---
 

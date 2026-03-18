@@ -319,6 +319,18 @@ export function buildSettingsHTML(minTurns, maxTurns, minLookback, maxLookback, 
       </div>
 
       <div class="chz-settings-row">
+        <label for="chz-set-autotrigger" data-i18n="chapterize.settings_autotrigger_label">Auto-trigger every N turns (0 = off)</label>
+        <input id="chz-set-autotrigger" type="number" min="0" max="100" step="1"
+               value="${s.autoTriggerEvery ?? 10}">
+      </div>
+
+      <div class="chz-settings-row">
+        <label for="chz-set-snooze" data-i18n="chapterize.settings_snooze_label">Re-remind after N turns (0 = once per threshold)</label>
+        <input id="chz-set-snooze" type="number" min="0" max="100" step="1"
+               value="${s.autoTriggerSnoozeTurns ?? 5}">
+      </div>
+
+      <div class="chz-settings-row">
         <label>
           <input id="chz-set-changelog" type="checkbox" ${s.storeChangelog ? 'checked' : ''}>
           <span data-i18n="chapterize.settings_store_changelog">Store changelog</span>

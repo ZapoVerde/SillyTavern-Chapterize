@@ -702,6 +702,64 @@
 .chz-rag-item--pending   { color: #6bbf6b; font-weight: 500; }
 .chz-rag-item--duplicate { color: var(--chz-warn-fg); font-weight: 500; }
 
+/* ─── Auto-trigger Banner ────────────────────────────────────────────────── */
+
+.chz-autotrigger-banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 9998;   /* below --chz-z-modal: 9999 */
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 16px;
+    background: var(--chz-warn-bg);
+    border-bottom: 1px solid var(--chz-warn-fg);
+    color: var(--chz-warn-fg);
+    font-size: 0.85rem;
+    box-sizing: border-box;
+}
+
+.chz-autotrigger-banner i {
+    flex-shrink: 0;
+}
+
+#chz-autotrigger-msg {
+    flex: 1;
+}
+
+#chz-autotrigger-open {
+    padding: 3px 12px;
+    border-radius: var(--chz-btn-radius);
+    border: 1px solid var(--chz-warn-fg);
+    background: transparent;
+    color: var(--chz-warn-fg);
+    font-size: 0.82rem;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+#chz-autotrigger-open:hover {
+    background: rgba(240, 192, 64, 0.2);
+}
+
+#chz-autotrigger-dismiss {
+    background: transparent;
+    border: none;
+    color: var(--chz-warn-fg);
+    font-size: 0.9rem;
+    cursor: pointer;
+    flex-shrink: 0;
+    padding: 0 4px;
+    line-height: 1;
+}
+
+#chz-autotrigger-dismiss:hover {
+    opacity: 0.7;
+}
+
 /* ─── Mobile ──────────────────────────────────────────────────────────────── */
 
 @media (max-width: 600px) {

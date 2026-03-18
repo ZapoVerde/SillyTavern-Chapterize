@@ -214,6 +214,8 @@ const SETTINGS_DEFAULTS = Object.freeze({
     lorebookPrompt:      DEFAULT_LOREBOOK_PROMPT,
     lorebookPromptAft:   DEFAULT_LOREBOOK_PROMPT_AFT,
     changelog:           [],
+    autoTriggerEvery:       10,
+    autoTriggerSnoozeTurns: 5,
 });
 
 // ─── Session State ────────────────────────────────────────────────────────────
@@ -311,6 +313,13 @@ let _repairSourceMessages = [];     // source chat messages fetched in onRepairC
 let _ledgerManifest  = null;  // in-memory manifest fetched/bootstrapped at modal open
 let _sessionStartId  = null;  // headNodeId captured at open; used for exit freshness lock
 let _lorebookDelta   = null;  // {createdUids, modifiedEntries} built during lorebook save
+
+// ─── Auto-trigger State ───────────────────────────────────────────────────────
+// Not reset by closeModal() — persists across wizard open/close cycles.
+// Reset by onChatChanged() when the user switches chats.
+
+let _autoTriggerLastChatLen   = 0;  // chat.length at last successful commit (or last chat switch)
+let _autoTriggerSuppressUntil = 0;  // suppress banner until chat.length exceeds this (snooze)
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
@@ -1523,6 +1532,13 @@ function hideRagNoSummaryMessage() {
 function injectModal() {
     if ($('#chz-overlay').length) return;
     $('body').append(buildModalHTML(MIN_TURNS, MAX_TURNS, DEFAULT_TURNS_N));
+    $('body').append(`
+        <div id="chz-autotrigger-banner" class="chz-autotrigger-banner chz-hidden">
+          <i class="fa-solid fa-forward-step"></i>
+          <span id="chz-autotrigger-msg" data-i18n="chapterize.autotrigger_msg">0 turns ready to chapterize</span>
+          <button id="chz-autotrigger-open" data-i18n="chapterize.autotrigger_open">Open Wizard</button>
+          <button id="chz-autotrigger-dismiss" data-i18n="[title]chapterize.autotrigger_dismiss_title" title="Dismiss">✕</button>
+        </div>`);
 
     // Step 1 — Character Workshop
     $('#chz-regen-suggestions').on('click', onRegenSuggestionsClick);
@@ -1584,6 +1600,19 @@ function injectModal() {
     $('#chz-move-back').on('click', () => updateWizard(_currentStep - 1));
     $('#chz-move-next').on('click', () => updateWizard(_currentStep + 1));
     $('#chz-confirm').on('click',   onConfirmClick);
+
+    // Auto-trigger banner buttons
+    $('#chz-autotrigger-open').on('click', () => {
+        hideAutoTriggerBanner();
+        onChapterizeClick();
+    });
+    $('#chz-autotrigger-dismiss').on('click', () => {
+        const context     = SillyTavern.getContext();
+        const len         = context?.chat?.length ?? 0;
+        const snoozeTurns = getSettings().autoTriggerSnoozeTurns ?? 5;
+        hideAutoTriggerBanner();
+        _autoTriggerSuppressUntil = snoozeTurns > 0 ? len + snoozeTurns : Infinity;
+    });
 }
 
 function showModal() {
@@ -3522,7 +3551,9 @@ async function onConfirmClick() {
             const freshChar = freshCtx.characters[freshIdx];
 
             await saveNewChat(freshChar, _chapterName, chatMetadata, lastN);
-            _finalizeSteps.chatSaved = true;
+            _finalizeSteps.chatSaved      = true;
+            _autoTriggerLastChatLen       = SillyTavern.getContext().chat.length;
+            _autoTriggerSuppressUntil     = 0;
             upsertReceiptItem('chz-receipt-chat', receiptSuccess(
                 `Chat saved: "${_chapterName}"`,
                 _isRepairMode ? 'chapter chat reset to original turn 0' : undefined,
@@ -3710,6 +3741,18 @@ function bindSettingsHandlers() {
         }
     });
 
+    $('#chz-set-autotrigger').on('input', function () {
+        const val = Math.max(0, parseInt($(this).val()) || 0);
+        getSettings().autoTriggerEvery = val;
+        saveSettingsDebounced();
+    });
+
+    $('#chz-set-snooze').on('input', function () {
+        const val = Math.max(0, parseInt($(this).val()) || 0);
+        getSettings().autoTriggerSnoozeTurns = val;
+        saveSettingsDebounced();
+    });
+
     $('#chz-set-changelog').on('change', () => {
         getSettings().storeChangelog = $('#chz-set-changelog').is(':checked');
         saveSettingsDebounced();
@@ -3852,6 +3895,46 @@ function injectButton() {
     $('#extensionsMenu').append(btn);
 }
 
+// ─── Auto-trigger ─────────────────────────────────────────────────────────────
+
+function showAutoTriggerBanner(count) {
+    $('#chz-autotrigger-msg').text(`${count} turns ready to chapterize`);
+    $('#chz-autotrigger-banner').removeClass('chz-hidden');
+}
+
+function hideAutoTriggerBanner() {
+    $('#chz-autotrigger-banner').addClass('chz-hidden');
+}
+
+function checkAutoTrigger() {
+    const threshold = getSettings().autoTriggerEvery ?? 10;
+    if (!threshold) return;
+
+    const context = SillyTavern.getContext();
+    if (!context?.chat) return;
+    if (context.groupId) return;
+    if (context.characterId == null) return;
+
+    const len = context.chat.length;
+    if (len <= _autoTriggerSuppressUntil) return;
+
+    const sinceLast = len - _autoTriggerLastChatLen;
+    if (sinceLast >= threshold) {
+        showAutoTriggerBanner(sinceLast);
+    }
+}
+
+function onMessageReceived() {
+    checkAutoTrigger();
+}
+
+function onChatChanged() {
+    hideAutoTriggerBanner();
+    _autoTriggerLastChatLen   = 0;
+    _autoTriggerSuppressUntil = 0;
+    setTimeout(checkAutoTrigger, 0);
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 async function init() {
@@ -3859,6 +3942,8 @@ async function init() {
     injectModal();
     injectSettingsPanel();
     injectButton();
+    eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
+    eventSource.on(event_types.CHAT_CHANGED,     onChatChanged);
 
     try {
         SlashCommandParser.addCommandObject(SlashCommand.fromProps({
