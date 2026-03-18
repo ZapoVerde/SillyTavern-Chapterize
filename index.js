@@ -464,6 +464,7 @@ async function ragFireChunk(chunkIndex) {
         const globalStale = _ragGlobalGenId !== globalGenId;
         const localStale  = chunk.genId !== localGenId;
         console.error(`[CHZ-DBG] ragFireChunk ERROR chunk=${chunkIndex} globalStale=${globalStale} localStale=${localStale} inFlight=${_ragInFlightCount}`, err);
+        if (err.cause) console.error(`[CHZ-DBG] ragFireChunk ERROR cause:`, err.cause);
         if (globalStale || localStale) return;
         chunk.status = 'pending';   // allow retry via regen button
     } finally {
