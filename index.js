@@ -216,6 +216,7 @@ const SETTINGS_DEFAULTS = Object.freeze({
     changelog:           [],
     autoTriggerEvery:       10,
     autoTriggerSnoozeTurns: 5,
+    autoTriggerModal:       false,
 });
 
 // ─── Session State ────────────────────────────────────────────────────────────
@@ -3753,6 +3754,11 @@ function bindSettingsHandlers() {
         saveSettingsDebounced();
     });
 
+    $('#chz-set-autotrigger-modal').on('change', () => {
+        getSettings().autoTriggerModal = $('#chz-set-autotrigger-modal').is(':checked');
+        saveSettingsDebounced();
+    });
+
     $('#chz-set-changelog').on('change', () => {
         getSettings().storeChangelog = $('#chz-set-changelog').is(':checked');
         saveSettingsDebounced();
@@ -3919,8 +3925,15 @@ function checkAutoTrigger() {
     if (len <= _autoTriggerSuppressUntil) return;
 
     const sinceLast = len - _autoTriggerLastChatLen;
-    if (sinceLast >= threshold) {
-        showAutoTriggerBanner(sinceLast);
+    if (sinceLast < threshold) return;
+
+    const snoozeTurns = getSettings().autoTriggerSnoozeTurns ?? 5;
+    _autoTriggerSuppressUntil = snoozeTurns > 0 ? len + snoozeTurns : Infinity;
+
+    if (getSettings().autoTriggerModal) {
+        onChapterizeClick();
+    } else {
+        toastr.warning(`${sinceLast} turns ready to chapterize`, 'Chapterize', { timeOut: 8000 });
     }
 }
 

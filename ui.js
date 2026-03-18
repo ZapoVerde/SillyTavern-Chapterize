@@ -332,6 +332,13 @@ export function buildSettingsHTML(minTurns, maxTurns, minLookback, maxLookback, 
 
       <div class="chz-settings-row">
         <label>
+          <input id="chz-set-autotrigger-modal" type="checkbox" ${s.autoTriggerModal ? 'checked' : ''}>
+          <span data-i18n="chapterize.settings_autotrigger_modal">Auto-open wizard (instead of toast notification)</span>
+        </label>
+      </div>
+
+      <div class="chz-settings-row">
+        <label>
           <input id="chz-set-changelog" type="checkbox" ${s.storeChangelog ? 'checked' : ''}>
           <span data-i18n="chapterize.settings_store_changelog">Store changelog</span>
         </label>

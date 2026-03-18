@@ -82,5 +82,6 @@
     "chapterize.autotrigger_open":             "Open Wizard",
     "chapterize.autotrigger_dismiss_title":    "Dismiss",
     "chapterize.settings_autotrigger_label":   "Auto-trigger every N turns (0 = off)",
-    "chapterize.settings_snooze_label":        "Re-remind after N turns (0 = once per threshold)"
+    "chapterize.settings_snooze_label":        "Re-remind after N turns (0 = once per threshold)",
+    "chapterize.settings_autotrigger_modal":   "Auto-open wizard (instead of toast notification)"
 }
