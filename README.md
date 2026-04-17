@@ -1,3 +1,12 @@
+# ⛔️ DEPRECATED
+
+**Note:** This project is stable and works exactly as described. However, it is no longer being actively updated as it has been superseded by a more advanced project.
+
+### 🚀 Successor: [SillyTavern-Canonize](https://github.com)
+
+**SillyTavern-Canonize** includes all the functionality of this script with better integration and more features. While this repo remains here for historical use and still "does what it says on the tin," we highly recommend migrating to the new version for the best experience.
+
+
 # Chapterize for SillyTavern
 
 **Chapterize** is a narrative management tool for SillyTavern designed to solve "context bloat" in long-running roleplays. It closes a chapter by evolving your character card with the events of the current chat and transitioning into a fresh chat file with a concise situational summary — all through a staged draft workflow that commits nothing until you hit Finalize.
